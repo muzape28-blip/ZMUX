@@ -89,7 +89,7 @@ class WebSocketPtyBridge(
      * `_handle_client_message` treats as terminal input after the JSON sniff fails.
      */
     fun sendInput(bytes: ByteArray) {
-        socket?.send(ByteString.of(*bytes))
+        socket?.send(ByteString.of(bytes, 0, bytes.size))
     }
 
     fun sendResize(cols: Int, rows: Int) {

@@ -45,16 +45,16 @@ class ZmuxTerminalSession(
     }
 
     fun feed(bytes: ByteArray) {
-        val emulator = session.getEmulator() ?: return
+        val emulator = TerminalSessionHelper.getEmulator(session) ?: return
         emulator.append(bytes, bytes.size)
         client.onTextChanged(session)
     }
 
     fun feedLine(text: String) = feed(("\r\n$text\r\n").toByteArray(Charsets.UTF_8))
 
-    val emulator: TerminalEmulator? get() = session.getEmulator()
-    val columns: Int get() = TerminalSessionHelper.getColumns(session.getEmulator())
-    val rows: Int get() = TerminalSessionHelper.getRows(session.getEmulator())
+    val emulator: TerminalEmulator? get() = TerminalSessionHelper.getEmulator(session)
+    val columns: Int get() = TerminalSessionHelper.getColumns(TerminalSessionHelper.getEmulator(session))
+    val rows: Int get() = TerminalSessionHelper.getRows(TerminalSessionHelper.getEmulator(session))
 
     fun finishIfRunning() {
         running = false

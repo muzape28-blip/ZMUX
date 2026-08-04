@@ -49,6 +49,16 @@ public class TerminalSessionHelper {
         }
     }
 
+    public static TerminalEmulator getEmulator(TerminalSession session) {
+        try {
+            Field f = TerminalSession.class.getDeclaredField("mEmulator");
+            f.setAccessible(true);
+            return (TerminalEmulator) f.get(session);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     public static int getColumns(TerminalEmulator emulator) {
         if (emulator == null) return 80;
         try {
