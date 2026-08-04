@@ -1,0 +1,104 @@
+name: ZMUX CI / Android APK Build & Protocol Gates
+
+on:
+  push:
+    branches: [ "**" ]
+  pull_request:
+    branches: [ "**" ]
+  workflow_dispatch:
+
+jobs:
+  protocol-check:
+    name: RFC-6455 Protocol Verification (9/9 Gates)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run Mock PTY WebSocket Server & Protocol Verification
+        working-directory: ./experimental/zmux-kotlin
+        run: |
+          echo "Starting mock_pty_ws_server.py on port 8011..."
+          python3 tools/mock_pty_ws_server.py --host 127.0.0.1 --port 8011 --token dev &
+          MOCK_PID=$!
+          sleep 1
+          echo "Running protocol_check.py against port 8011..."
+          python3 tools/protocol_check.py --port 8011 --token dev
+          kill $MOCK_PID || true
+
+  build-android-apk:
+    name: Build Android Kotlin Native UI APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Setup Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+          cache-read-only: false
+
+      - name: Ensure Gradle Wrapper is Generated
+        working-directory: ./experimental/zmux-kotlin
+        run: |
+          if [ ! -f ./gradlew ]; then
+            gradle wrapper --gradle-version 8.7
+          fi
+          chmod +x ./gradlew
+
+      - name: Build Debug APK (assembleDebug)
+        working-directory: ./experimental/zmux-kotlin
+        run: ./gradlew :app:assembleDebug --stacktrace
+
+      - name: Upload Debug APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zmux-kotlin-debug-apk
+          path: experimental/zmux-kotlin/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Run Android Lint (lintDebug)
+        working-directory: ./experimental/zmux-kotlin
+        run: ./gradlew :app:lintDebug --continue
+        continue-on-error: true
+
+      - name: Upload Lint Results Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: zmux-kotlin-lint-report
+          path: experimental/zmux-kotlin/app/build/reports/lint-results-debug.html
+          if-no-files-found: ignore
+          retention-days: 14
+
+  ci-summary:
+    name: CI Pipeline Summary
+    needs: [protocol-check, build-android-apk]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate Pipeline Summary Report
+        run: |
+          echo "# ZMUX CI & Build Activity Report 🚀" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Pipeline Stage | Status | Detail |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| **RFC-6455 Protocol Check** | ${{ needs.protocol-check.result == 'success' && '✅ PASSED' || '❌ FAILED' }} | Verified 9/9 WebSocket PTY protocol gates |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Android Kotlin UI Build** | ${{ needs.build-android-apk.result == 'success' && '✅ PASSED' || '❌ FAILED' }} | Compiled \`app-debug.apk\` & uploaded artifact |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Artifacts Available for Download:" >> $GITHUB_STEP_SUMMARY
+          echo "- \`zmux-kotlin-debug-apk\` — Ready-to-install Android debug APK for ZMUX Ember UI" >> $GITHUB_STEP_SUMMARY
+          echo "- \`zmux-kotlin-lint-report\` — Android Lint diagnostic report" >> $GITHUB_STEP_SUMMARY
