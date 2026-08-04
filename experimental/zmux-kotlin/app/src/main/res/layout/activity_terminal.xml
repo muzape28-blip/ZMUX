@@ -96,7 +96,7 @@
                 android:textSize="14sp" />
         </LinearLayout>
 
-        <com.zmux.terminal.ZmuxTerminalView
+        <com.termux.view.TerminalView
             android:id="@+id/terminal_view"
             android:layout_width="match_parent"
             android:layout_height="0dp"

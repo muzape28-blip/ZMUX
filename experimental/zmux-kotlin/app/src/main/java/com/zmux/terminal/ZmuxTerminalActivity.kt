@@ -13,7 +13,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
-import com.termux.terminal.ZmuxTerminalSession
+import com.termux.view.TerminalView
 import com.zmux.terminal.widget.BootBrandView
 import com.zmux.terminal.widget.KeyCapView
 import com.zmux.terminal.widget.SessionTabView
@@ -28,7 +28,7 @@ import com.zmux.terminal.widget.StatusPillView
  */
 class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient, WebSocketPtyBridge.Listener {
 
-    private lateinit var terminalView: ZmuxTerminalView
+    private lateinit var terminalView: TerminalView
     private lateinit var statusPill: StatusPillView
     private lateinit var hostInput: EditText
     private lateinit var portInput: EditText
@@ -67,10 +67,13 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient, WebSock
 
         viewClient = ZmuxViewClient(terminalView)
         terminalView.setTerminalViewClient(viewClient)
-        terminalView.applyZmuxDefaults()
+        terminalView.setTextSize((12 * resources.displayMetrics.density).toInt())
+        terminalView.keepScreenOn = true
+        terminalView.isFocusable = true
+        terminalView.isFocusableInTouchMode = true
 
-        session = ZmuxTerminalSession(this)
-        terminalView.attach(session)
+        session = com.termux.terminal.ZmuxTerminalSession(this)
+        terminalView.attachSession(session.session)
         
         terminalView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
             session.onResize?.invoke(session.columns, session.rows)
