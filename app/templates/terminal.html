@@ -1,0 +1,1120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<script>
+// Catch global errors early and display them in the boot status overlay
+window.onerror = function(msg, url, line, col, error) {
+  var statusEl = document.getElementById('boot-status');
+  if (statusEl) {
+    statusEl.innerHTML = '<span style="color: #f85149; font-weight: bold;">Error: ' + msg + '</span><br><span style="font-size: 10px; color: #8b949e;">at ' + (url ? url.split('/').pop() : 'unknown') + ':' + line + ':' + col + '</span>';
+  }
+  return false;
+};
+window.onunhandledrejection = function(event) {
+  var statusEl = document.getElementById('boot-status');
+  if (statusEl) {
+    statusEl.innerHTML = '<span style="color: #f85149; font-weight: bold;">Unhandled Promise: ' + event.reason + '</span>';
+  }
+};
+</script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>ZMUX Terminal</title>
+<!-- Load Vendored xterm.css strictly from local assets to avoid CDN dependency -->
+<link rel="stylesheet" href="/static/vendor/xterm/xterm.css">
+<style>
+:root {
+  --bg: #0d1117;
+  --bg-input: #161b22;
+  --text: #c9d1d9;
+  --text-bright: #58a6ff;
+  --text-dim: #484f58;
+  --green: #3fb950;
+  --red: #f85149;
+  --yellow: #d29922;
+  --mono: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body {
+  /* --app-height is set from Android's VisualViewport when the IME opens.
+     Keeping it on both roots makes the flex shell genuinely shrink instead
+     of merely being panned behind the soft keyboard. */
+  height: var(--app-height, 100%);
+  width: 100%;
+  overflow: hidden;
+  background: var(--bg);
+}
+body {
+  color: var(--text);
+  font-family: var(--mono);
+  display: flex;
+  flex-direction: column;
+}
+
+/* Top Bar */
+#topbar {
+  /* Terminal space is the primary UI on a phone. Keep controls tappable but
+     avoid spending two full desktop-height rows above every session. */
+  height: 36px;
+  background: var(--bg-input);
+  border-bottom: 1px solid #30363d;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  flex-shrink: 0;
+}
+#topbar .title {
+  font-weight: 700;
+  color: var(--green);
+  font-size: 14px;
+  letter-spacing: 0.05em;
+}
+#topbar .title::before { content: '> '; }
+/* Virtual-key bar visibility toggle, right beside the title. */
+#keys-toggle {
+  margin-left: 10px;
+  background: transparent;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1;
+  padding: 6px 8px;            /* generous tap target */
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+#keys-toggle.active { color: var(--green); border-color: var(--green); }
+#status {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* Session tab strip */
+#tabs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px 0 12px;
+  height: 38px;
+  background: var(--bg-input);
+  border-bottom: 1px solid #30363d;
+  flex-shrink: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+#tabs::-webkit-scrollbar { height: 0; display: none; }
+.tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 5px 12px;           /* compact, still a comfortable tap target */
+  min-width: 40px;
+  min-height: 30px;
+  font-size: 12px;
+  font-family: var(--mono);
+  color: var(--text-dim);
+  background: #21262d;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+  -webkit-user-select: none;
+  position: relative;
+  overflow: hidden;
+}
+.tab.active { color: var(--green); border-color: var(--green); background: #12261a; }
+/* A dot marks a session that is running something while you are elsewhere. */
+.tab .busy { width: 6px; height: 6px; border-radius: 50%; background: var(--yellow); }
+/* Hold-to-close: while the finger is down the tab flashes red and a
+   progress bar fills; at 100% the session closes. Releasing (or sliding
+   the finger away) before that cancels — a plain tap still switches. */
+.tab.holding { color: var(--red); border-color: var(--red); background: #2d1215; }
+.tab.holding::after {
+  content: '';
+  position: absolute;
+  left: 0; bottom: 0;
+  height: 3px; width: 0;
+  background: var(--red);
+  animation: tab-hold-progress 1.5s linear forwards;
+}
+@keyframes tab-hold-progress { from { width: 0; } to { width: 100%; } }
+#tab-new {
+  color: var(--text-bright); background: transparent; border: 1px dashed #30363d;
+  border-radius: 4px; padding: 5px 11px; min-height: 30px; font-size: 13px;
+  cursor: pointer; flex-shrink: 0;
+}
+#status-dot {
+  display: inline-block;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+#status-dot.idle { background: var(--green); }
+#status-dot.running { background: var(--yellow); animation: blink 0.6s infinite; }
+#status-dot.failed { background: var(--red); }
+#status-dot.stopped { background: var(--text-dim); }
+@keyframes blink { 50% { opacity: 0.3; } }
+
+/* Terminal Container */
+#terminal-container {
+  /* min-height:0 is essential in a column flex layout: without it this item
+     may retain its content height and slide underneath Android's IME. */
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  background: var(--bg);
+  padding: 8px;
+  overflow: hidden;
+  position: relative;
+}
+
+/* xterm custom tweaks to match layout */
+.xterm {
+  height: 100%;
+  width: 100%;
+}
+.xterm-viewport {
+  background-color: var(--bg) !important;
+  /* Smooth, hardware-accelerated momentum scrolling on phones; without it
+     dragging through a long traceback stutters on low-end devices. */
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  will-change: scroll-position;
+}
+/* Make sure the xterm canvas never exceeds the visible container, so lines
+   wrap at the real screen edge instead of running past it. */
+.xterm-screen {
+  width: 100% !important;
+  max-width: 100% !important;
+}
+
+/* Bottom toolbar — deliberately ONE horizontal row. A mobile keyboard has
+   already consumed most of the screen; wrapping controls into 2–3 rows made
+   the live terminal unusable. Swipe horizontally for less common keys. */
+#toolbar {
+  background: var(--bg-input);
+  border-top: 1px solid #30363d;
+  padding: 6px;
+  display: flex;
+  flex-direction: row;
+  gap: 5px;
+  flex-shrink: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+#toolbar::-webkit-scrollbar { height: 0; display: none; }
+/* Hidden via the topbar toggle; display:none (not height:0) so the flex
+   layout hands every pixel back to the terminal before fitTerminal(). */
+#toolbar.hidden { display: none; }
+.key-row {
+  display: flex;
+  gap: 5px;
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+}
+.key-row::-webkit-scrollbar { height: 0; display: none; }
+/* The compact toolbar remains easy to tap, while consuming only one row. */
+.tool-btn { min-height: 38px; }
+@media (max-height: 620px) {
+  #topbar { height: 34px; }
+  #tabs { height: 36px; }
+  .tab, #tab-new { min-height: 28px; padding-top: 4px; padding-bottom: 4px; }
+  #toolbar { padding: 4px 6px; }
+  .tool-btn { min-height: 34px; padding: 4px 9px; }
+}
+
+.tool-btn {
+  background: #21262d;
+  border: 1px solid #30363d;
+  color: var(--text);
+  padding: 6px 10px;
+  font-family: var(--mono);
+  font-size: 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  flex-shrink: 0;
+  white-space: nowrap;
+  -webkit-tap-highlight-color: transparent;
+}
+.tool-btn:active { background: #30363d; }
+.tool-btn.danger { color: var(--red); border-color: #f8514933; }
+/* A latched modifier (tap CTRL, then tap a letter) must look obviously armed. */
+.tool-btn.latched {
+  background: var(--text-bright);
+  border-color: var(--text-bright);
+  color: #0d1117;
+  font-weight: 700;
+}
+.tool-btn.danger:active { background: #f8514922; }
+
+/* Boot screen */
+#boot {
+  position: fixed; inset: 0; background: #000;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  z-index: 1000; transition: opacity 0.3s;
+}
+#boot.hide { opacity: 0; pointer-events: none; }
+#boot .logo {
+  font-size: 36px; font-weight: 900; color: var(--green);
+  letter-spacing: 0.1em; margin-bottom: 20px;
+  text-shadow: 0 0 20px rgba(63,185,80,0.5);
+}
+#boot .logo-img {
+  width: 96px; height: 96px;
+  border-radius: 22%;
+  margin-bottom: 16px;
+  box-shadow: 0 0 24px rgba(63,185,80,0.35);
+}
+#boot .status { color: var(--text-dim); font-size: 12px; }
+</style>
+</head>
+<body>
+
+<div id="boot">
+  <img class="logo-img" src="/static/logo.png" alt="ZMUX logo">
+  <div class="logo">ZMUX</div>
+  <div class="status" id="boot-status">Starting secure interactive terminal...</div>
+</div>
+
+<div id="topbar">
+  <span class="title">ZMUX</span>
+  <button id="keys-toggle" type="button" class="active"
+          title="Show/hide the virtual key bar"
+          aria-label="Toggle virtual key bar">KEYS</button>
+  <span id="status"><span id="status-dot" class="idle"></span><span id="status-text">connected</span></span>
+</div>
+
+<!-- Session tabs (populated from the backend's `sessions` messages) -->
+<div id="tabs"></div>
+
+<!-- Mount element for xterm.js -->
+<div id="terminal-container"></div>
+
+<!-- Virtual keys. Built from KEY_ROWS in JS so the layout is data, not markup. -->
+<div id="toolbar"></div>
+
+<!-- Load Vendored xterm.js strictly from local assets to avoid CDN dependency -->
+<script src="/static/vendor/xterm/xterm.js"></script>
+<script>
+const AUTH_TOKEN = "{{ auth_token }}";
+const WS_PORT = {{ ws_port }};
+
+const bootScreen = document.getElementById('boot');
+const bootStatus = document.getElementById('boot-status');
+const statusDot = document.getElementById('status-dot');
+const statusText = document.getElementById('status-text');
+
+let ws = null;
+let term = null;
+let resizeTimeout = null;
+let followPending = false;
+
+// Scroll-follow state: while the user has not scrolled up to read, new
+// output keeps the viewport glued to the bottom (aggressive scroll).
+let userScrolledUp = false;
+let lastScrollTop = 0;
+
+// Coalesce scroll-to-bottom with requestAnimationFrame: while a command
+// streams many small chunks (a traceback, git progress), each chunk used to
+// trigger an immediate scrollToBottom(), reflowing the canvas every time and
+// making scrolling stutter on low-end phones. One scroll per frame is all a
+// display can show anyway. Falls back to a short timer where
+// requestAnimationFrame is unavailable (tests, odd embedders).
+function nextFrame(cb) {
+  try {
+    if (typeof requestAnimationFrame === "function") { requestAnimationFrame(cb); return; }
+  } catch (e) {}
+  setTimeout(cb, 16);
+}
+function scrollFollow() {
+  if (followPending) return;
+  followPending = true;
+  nextFrame(() => {
+    followPending = false;
+    if (!userScrolledUp && term) term.scrollToBottom();
+  });
+}
+
+// Reconnection state: retry automatically for a while, then surface a
+// visible, tappable error instead of silently spinning forever.
+let reconnectAttempts = 0;
+let everConnected = false;
+let manualRetryHandler = null;
+const MAX_AUTO_RECONNECT = 10;
+const RECONNECT_DELAY_MS = 1500;
+
+// Initialize xterm.js
+function initTerminal() {
+  term = new Terminal({
+    cursorBlink: true,
+    // Treat a bare LF as CRLF: Alpine/busybox tools sometimes emit \n alone,
+    // and without this the next line starts mid-row (the "messy, unaligned
+    // left edge" output). Real PTYs do this in the kernel (ONLCR); for the
+    // legacy app-control console this is the faithful equivalent.
+    convertEol: true,
+    fontSize: 13,
+    fontFamily: "'JetBrains Mono', 'Fira Code', 'Courier New', monospace",
+    lineHeight: 1.2,
+    // Generous history so a long traceback (or a big `cat README.md`) can be
+    // scrolled back to in full; xterm renders this lazily.
+    scrollback: 6000,
+    theme: {
+      background: "#0d1117",
+      foreground: "#c9d1d9",
+      cursor: "#58a6ff",
+      black: "#0d1117",
+      red: "#f85149",
+      green: "#3fb950",
+      yellow: "#d29922",
+      blue: "#58a6ff",
+      magenta: "#bc8cff",
+      cyan: "#39c5cf",
+      white: "#e6edf3",
+      brightBlack: "#484f58",
+      brightRed: "#ff7b72",
+      brightGreen: "#56d364",
+      brightYellow: "#f0b72f",
+      brightBlue: "#79c0ff",
+      brightMagenta: "#d3b2ff",
+      brightCyan: "#56d4dd",
+      brightWhite: "#ffffff"
+    }
+  });
+
+  const container = document.getElementById('terminal-container');
+  term.open(container);
+  term.focus();
+
+  // Route soft-keyboard input through the modifier latch, so a latched CTRL
+  // applies to the next typed character too (not just virtual-key taps).
+  term.onData((data) => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    // Typing while reading history snaps back to live output — a real
+    // terminal never lets you type into the past (this is also why the
+    // screen used to only "catch up" after the first keystroke).
+    if (userScrolledUp) {
+      userScrolledUp = false;
+      try { term.scrollToBottom(); } catch (e) {}
+    }
+    if (ctrlLatched && data.length === 1) { sendKeyInput(data); return; }
+    // Ctrl+B is deliberately NOT intercepted here: vim (and other TUIs) use
+    // it for page-up. Any explicit PTY toggle is legacy compatibility only.
+    ws.send(data);
+  });
+
+  // Scroll-follow, terminal-style:
+  //   * scrolling UP is bounded by the first scrollback line (xterm does it),
+  //   * scrolling DOWN is always free — reaching the bottom re-arms follow,
+  //   * new output NEVER yanks the viewport while the user reads history.
+  // The old code latched `userScrolledUp` on any upward scrollTop movement,
+  // which misfired on programmatic jumps (a `\x1b[2J` clear collapses the
+  // viewport to 0; a resize reflow shifts offsets) and froze follow mode.
+  // Now only real input (wheel / touch-drag / PageUp) marks "reading", and
+  // onScroll only ever UN-latches when the bottom is reached again.
+  userScrolledUp = false;
+  lastScrollTop = 0;
+  term.onScroll((scrollTop) => {
+    if (scrollTop >= (term.buffer.active.baseY || 0)) userScrolledUp = false;
+    lastScrollTop = scrollTop;
+  });
+  bindScrollIntent(container);
+}
+
+// True while there is output above the viewport to scroll into.
+function hasScrollback() {
+  return !!(term && term.buffer && (term.buffer.active.baseY || 0) > 0);
+}
+
+// Mark "user is reading history" exclusively from genuine user gestures.
+function bindScrollIntent(container) {
+  const viewport = container.querySelector('.xterm-viewport') || container;
+  viewport.addEventListener('wheel', (e) => {
+    if (e.deltaY < 0 && hasScrollback()) userScrolledUp = true;
+  }, { passive: true });
+
+  // Touch: dragging a finger DOWN pulls earlier output into view.
+  let lastTouchY = null;
+  viewport.addEventListener('touchstart', (e) => {
+    if (e.touches && e.touches.length) lastTouchY = e.touches[0].clientY;
+  }, { passive: true });
+  viewport.addEventListener('touchmove', (e) => {
+    if (lastTouchY === null || !e.touches || !e.touches.length) return;
+    const y = e.touches[0].clientY;
+    if (y - lastTouchY > 8 && hasScrollback()) userScrolledUp = true;
+    lastTouchY = y;
+  }, { passive: true });
+
+  // Desktop nicety: keyboard scrolling (Shift+PageUp inside xterm).
+  container.addEventListener('keydown', (e) => {
+    if (e.key === 'PageUp' && hasScrollback()) userScrolledUp = true;
+  });
+}
+
+// Output writes are coalesced to ONE term.write() per animation frame.
+// While a command streams many small chunks (traceback, git progress, apk
+// bars), writing each chunk to xterm immediately forced a render pass per
+// message and stuttered on low-end phones. One batched write per frame is
+// all a display can show anyway (same idea as the scrollFollow rAF latch).
+let writeQueue = [];
+let writeFlushPending = false;
+
+function flushTermWrite() {
+  writeFlushPending = false;
+  if (!term || writeQueue.length === 0) { writeQueue = []; return; }
+  const batch = writeQueue;
+  writeQueue = [];
+  try {
+    if (batch.length === 1) { term.write(batch[0]); return; }
+    const allBinary = batch.every((c) => c instanceof Uint8Array);
+    const allText = batch.every((c) => typeof c === 'string');
+    if (allBinary) {
+      let total = 0;
+      for (const c of batch) total += c.length;
+      const merged = new Uint8Array(total);
+      let offset = 0;
+      for (const c of batch) { merged.set(c, offset); offset += c.length; }
+      term.write(merged);
+    } else if (allText) {
+      term.write(batch.join(''));
+    } else {
+      for (const c of batch) term.write(c);
+    }
+  } catch (e) {}
+}
+
+// Every output payload (binary or text) flows through here. A payload that
+// clears the screen/scrollback (`\x1b[2J` / `\x1b[3J` — the `clear` builtin,
+// session switches) repaints from scratch: snap back to live output, re-arm
+// follow, and force a refresh so the cleared canvas renders at the current
+// width — otherwise the viewport appears glued to stale history or
+// mis-measured.
+// This exact sequence is emitted by the session manager before it replays a
+// different tab. CSI 2J clears only the *visible* xterm page; its scrollback
+// still held the old tab, so dragging upward exposed another session's ping /
+// git output. Detect the manager reset and clear xterm's own buffer first.
+const SESSION_RESET_SEQUENCE = '\x1b[?1049l\x1b[?47l\x1b[?1047l\x1b[2J\x1b[H';
+function isSessionScreenReset(data) {
+  if (typeof data === 'string') return data.indexOf(SESSION_RESET_SEQUENCE) !== -1;
+  if (!data || data.length < SESSION_RESET_SEQUENCE.length) return false;
+  for (let start = 0; start <= data.length - SESSION_RESET_SEQUENCE.length; start++) {
+    let same = true;
+    for (let i = 0; i < SESSION_RESET_SEQUENCE.length; i++) {
+      if (data[start + i] !== SESSION_RESET_SEQUENCE.charCodeAt(i)) { same = false; break; }
+    }
+    if (same) return true;
+  }
+  return false;
+}
+function clearPreviousSessionBuffer() {
+  writeQueue.length = 0; // discard output queued for the tab just left
+  try { if (term && typeof term.clear === 'function') term.clear(); } catch (e) {}
+  userScrolledUp = false;
+  lastScrollTop = 0;
+}
+
+function writeTerminalOutput(data, containsClearScreen) {
+  if (isSessionScreenReset(data)) clearPreviousSessionBuffer();
+  if (typeof data === 'string') {
+    if (data) writeQueue.push(data);
+  } else if (data && data.length) {
+    writeQueue.push(new Uint8Array(data));
+  }
+  if (!writeFlushPending) {
+    writeFlushPending = true;
+    nextFrame(flushTermWrite);
+  }
+  if (containsClearScreen) {
+    userScrolledUp = false;
+    lastScrollTop = 0;
+    scrollFollow();
+    nextFrame(() => {
+      if (!term) return;
+      try { term.refresh(0, term.rows - 1); } catch (e) {}
+    });
+  } else if (!userScrolledUp) {
+    scrollFollow();
+  }
+}
+
+// Scan a binary frame for a screen/scrollback clear (ESC [ 2 J or ESC [ 3 J)
+// without decoding the whole buffer.
+function bytesContainClearScreen(bytes) {
+  for (let i = 0; i + 4 <= bytes.length; i++) {
+    if (bytes[i] === 0x1b && bytes[i + 1] === 0x5b &&
+        (bytes[i + 2] === 0x32 || bytes[i + 2] === 0x33) &&
+        bytes[i + 3] === 0x4a) return true;
+  }
+  return false;
+}
+
+// Connect to secure WebSocket server (port passed dynamically by backend)
+function getWsHost(attempt) {
+  const hosts = [];
+  if (window.location.hostname) hosts.push(window.location.hostname);
+  if (window.location.hostname !== "127.0.0.1") hosts.push("127.0.0.1");
+  if (window.location.hostname !== "localhost") hosts.push("localhost");
+  if (hosts.length === 0) hosts.push("127.0.0.1");
+  return hosts[attempt % hosts.length];
+}
+
+function connectWebSocket() {
+  // Use candidate hosts to correctly connect across Android ROMs (IPv4 vs IPv6 loopback quirks)
+  const wsHost = getWsHost(reconnectAttempts);
+  const wsUrl = `ws://${wsHost}:${WS_PORT}/?token=${AUTH_TOKEN}`;
+
+  try {
+    ws = new WebSocket(wsUrl);
+  } catch (e) {
+    console.error("WebSocket constructor failed:", e);
+    scheduleReconnect();
+    return;
+  }
+
+  // Handle binary messages from Python server cleanly
+  ws.binaryType = "blob";
+
+  ws.onopen = () => {
+    console.log("WebSocket connected to ZMUX PTY session");
+    statusDot.className = "idle";
+    statusText.textContent = "connected";
+    reconnectAttempts = 0;
+    everConnected = true;
+    bootScreen.onclick = null;
+
+    // Hide boot screen on first successful connection
+    setTimeout(() => {
+      bootScreen.classList.add('hide');
+      setTimeout(() => { bootScreen.style.display = 'none'; }, 300);
+      fitTerminal();
+    }, 400);
+  };
+
+  ws.onmessage = (event) => {
+    if (!term) return;
+    if (event.data instanceof Blob) {
+      // Binary frame: raw terminal output.
+      event.data.arrayBuffer().then((buf) => {
+        const bytes = new Uint8Array(buf);
+        writeTerminalOutput(bytes, bytesContainClearScreen(bytes));
+      });
+    } else {
+      // Text frame: a control message (session state), or plain output.
+      if (handleControlMessage(event.data)) return;
+      writeTerminalOutput(event.data, event.data.indexOf('\x1b[2J') !== -1);
+    }
+  };
+
+  ws.onclose = () => {
+    console.log("WebSocket closed");
+    scheduleReconnect();
+  };
+
+  ws.onerror = (err) => {
+    console.error("WebSocket error:", err);
+    statusDot.className = "failed";
+    statusText.textContent = "error";
+  };
+}
+
+// Retry automatically for a while, then give the user an explicit,
+// tappable failure state instead of an infinite silent spinner.
+function scheduleReconnect() {
+  reconnectAttempts++;
+  if (reconnectAttempts <= MAX_AUTO_RECONNECT) {
+    statusDot.className = "stopped";
+    statusText.textContent = `reconnecting (${reconnectAttempts}/${MAX_AUTO_RECONNECT})`;
+    if (!everConnected) {
+      bootStatus.textContent = `Waiting for backend shell... (attempt ${reconnectAttempts}/${MAX_AUTO_RECONNECT})`;
+    }
+    setTimeout(connectWebSocket, RECONNECT_DELAY_MS);
+    return;
+  }
+
+  statusDot.className = "failed";
+  statusText.textContent = "connection failed — tap to retry";
+  if (!everConnected) {
+    bootStatus.innerHTML =
+      '<span style="color:#f85149;font-weight:bold">Could not reach the terminal backend.</span>' +
+      '<br><span style="font-size:11px;color:#8b949e">Tap anywhere to try again</span>';
+  } else if (term) {
+    term.write("\r\n\x1b[31m[connection lost — tap terminal to reconnect]\x1b[0m\r\n");
+  }
+  enableManualRetry();
+}
+
+function enableManualRetry() {
+  const retry = () => {
+    if (ws && ws.readyState === WebSocket.OPEN) return;
+    reconnectAttempts = 0;
+    bootScreen.onclick = null;
+    if (!everConnected) {
+      bootStatus.textContent = "Reconnecting to secure backend shell...";
+    }
+    connectWebSocket();
+    if (term) term.focus();
+  };
+  bootScreen.onclick = retry;
+  manualRetryHandler = retry;
+}
+
+// Send raw characters/actions over WebSocket
+function sendRaw(data) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(data);
+    term.focus();
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Session tabs
+ *
+ * The backend owns session state; the client only renders it and sends
+ * intents. A `{"type":"sessions"}` text frame arrives on connect and after
+ * every new/switch/close.
+ * ------------------------------------------------------------------ */
+function handleControlMessage(text) {
+  if (!text || text[0] !== '{') return false;
+  let msg;
+  try { msg = JSON.parse(text); } catch (e) { return false; }
+  if (msg.type !== 'sessions') return false;
+  renderTabs(msg);
+  return true;
+}
+
+function sendAction(payload) {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload));
+}
+
+/* Hold ~1.5s on a tab to close its session; a plain tap switches.
+   The tiny per-tab "×" button was removed: on a phone it sat millimetres
+   from the switch target and ate mis-taps. The backend already survives
+   every close — closing the last session opens a fresh one on its own. */
+const HOLD_TO_CLOSE_MS = 1500;    /* matches the CSS progress-bar fill */
+const HOLD_CANCEL_PX = 12;        /* finger travel that aborts the hold */
+const HOLD_SUPPRESS_CLICK_MS = 450;
+let suppressTabClick = false;
+
+function attachTabHold(tab, sessionId) {
+  let timer = null;
+  let startX = 0;
+  let startY = 0;
+
+  const cancelHold = () => {
+    if (timer !== null) { clearTimeout(timer); timer = null; }
+    tab.classList.remove('holding');
+  };
+  const fire = () => {
+    timer = null;
+    tab.classList.remove('holding');
+    if (navigator.vibrate) {
+      try { navigator.vibrate(40); } catch (e) { /* haptics are optional */ }
+    }
+    /* The finger is still down; lifting it produces a click that must not
+       switch back into the tab we just closed. */
+    suppressTabClick = true;
+    setTimeout(() => { suppressTabClick = false; }, HOLD_SUPPRESS_CLICK_MS);
+    sendAction({ action: 'session.close', id: sessionId });
+  };
+  const startHold = (x, y) => {
+    cancelHold();
+    startX = x; startY = y;
+    tab.classList.add('holding');
+    timer = setTimeout(fire, HOLD_TO_CLOSE_MS);
+  };
+  const trackMove = (x, y) => {
+    if (timer === null) return;
+    if (Math.abs(x - startX) > HOLD_CANCEL_PX ||
+        Math.abs(y - startY) > HOLD_CANCEL_PX) cancelHold();
+  };
+
+  /* Touch listeners stay passive so the strip keeps scrolling natively;
+     the movement check above is what tells a scroll from a hold. */
+  tab.addEventListener('touchstart', (e) => {
+    if (!e.touches || !e.touches.length) return;
+    startHold(e.touches[0].clientX, e.touches[0].clientY);
+  }, { passive: true });
+  tab.addEventListener('touchmove', (e) => {
+    if (!e.touches || !e.touches.length) return;
+    trackMove(e.touches[0].clientX, e.touches[0].clientY);
+  }, { passive: true });
+  tab.addEventListener('touchend', cancelHold);
+  tab.addEventListener('touchcancel', cancelHold);
+
+  /* Desktop parity (mouse hold), and easier testing. */
+  tab.addEventListener('mousedown', (e) => startHold(e.clientX, e.clientY));
+  tab.addEventListener('mousemove', (e) => trackMove(e.clientX, e.clientY));
+  tab.addEventListener('mouseup', cancelHold);
+  tab.addEventListener('mouseleave', cancelHold);
+}
+
+function renderTabs(state) {
+  const bar = document.getElementById('tabs');
+  bar.innerHTML = '';
+  const list = state.sessions || [];
+
+  list.forEach((session, index) => {
+    const tab = document.createElement('div');
+    tab.className = 'tab' + (session.id === state.active ? ' active' : '');
+    tab.title = 'Tap to switch — hold to close';
+
+    if (session.busy && session.id !== state.active) {
+      const dot = document.createElement('span');
+      dot.className = 'busy';
+      tab.appendChild(dot);
+    }
+
+    const label = document.createElement('span');
+    label.textContent = String(index + 1);
+    tab.appendChild(label);
+
+    // The whole tab is the tap target (big enough for thumbs now).
+    tab.addEventListener('click', () => {
+      if (suppressTabClick) { suppressTabClick = false; return; }
+      sendAction({ action: 'session.switch', id: session.id });
+    });
+    attachTabHold(tab, session.id);
+
+    bar.appendChild(tab);
+  });
+
+  if (list.length < (state.max || 8)) {
+    const add = document.createElement('button');
+    add.id = 'tab-new';
+    add.type = 'button';
+    add.textContent = '+';
+    add.title = 'New session';
+    add.addEventListener('click', () => sendAction({ action: 'session.new' }));
+    bar.appendChild(add);
+  }
+
+  // Keep the active tab visible when the strip overflows.
+  const active = bar.querySelector('.tab.active');
+  if (active) active.scrollIntoView({ inline: 'nearest', block: 'nearest' });
+}
+
+/* ------------------------------------------------------------------ *
+ * Virtual keys
+ *
+ * Data-driven (cf. Termux's JSON extra-keys config) so the layout can
+ * later come from a preference file instead of hardcoded markup.
+ *
+ *   label     text on the button
+ *   send      literal string sent to the terminal
+ *   action    'pty.toggle' — legacy compatibility toggle (not normal UX)
+ *   modifier  'ctrl' — latches instead of sending (tap CTRL, then a key)
+ *   repeat    auto-repeats while held (arrows, backspace)
+ * ------------------------------------------------------------------ */
+const KEY_ROWS = [
+  [
+    { label: 'ESC', send: '\x1b' },
+    { label: 'CTRL', modifier: 'ctrl' },
+    { label: 'Tab', send: '\t' },
+    { label: '↑', send: '\x1b[A', repeat: true },
+    { label: '↓', send: '\x1b[B', repeat: true },
+    { label: '←', send: '\x1b[D', repeat: true },
+    { label: '→', send: '\x1b[C', repeat: true },
+    { label: 'Home', send: '\x1b[H' },
+    { label: 'End', send: '\x1b[F' },
+    { label: '^C', send: '\x03', danger: true },
+    { label: '^D', send: '\x04', danger: true },
+    { label: '⌫', send: '\x7f', repeat: true },
+    { label: '/', send: '/' },
+    { label: '-', send: '-' },
+    { label: '~', send: '~' },
+    { label: '|', send: '|' },
+    { label: '>', send: '>' },
+    { label: '&', send: '&' },
+    { label: '*', send: '*' },
+    { label: '"', send: '"' },
+    { label: "'", send: "'" }
+  ]
+];
+
+const REPEAT_INITIAL_DELAY_MS = 400;
+const REPEAT_INTERVAL_MS = 55;
+
+let ctrlLatched = false;
+let ctrlButton = null;
+
+// Translate a printable character into its control code: Ctrl+C -> 0x03.
+function toControlCode(text) {
+  if (!text || text.length !== 1) return null;
+  const upper = text.toUpperCase();
+  const code = upper.charCodeAt(0);
+  if (code >= 64 && code < 128) return String.fromCharCode(code & 0x1f);
+  return null;
+}
+
+function setCtrlLatched(active) {
+  ctrlLatched = active;
+  if (ctrlButton) ctrlButton.classList.toggle('latched', active);
+}
+
+// Route terminal input through the latch so CTRL applies to the next key,
+// whether it comes from a virtual key or the soft keyboard.
+function sendKeyInput(text) {
+  if (ctrlLatched) {
+    const control = toControlCode(text);
+    setCtrlLatched(false);
+    if (control !== null) { sendRaw(control); return; }
+  }
+  sendRaw(text);
+}
+
+function buildVirtualKeys() {
+  const toolbar = document.getElementById('toolbar');
+  toolbar.innerHTML = '';
+  KEY_ROWS.forEach((row) => {
+    const rowEl = document.createElement('div');
+    rowEl.className = 'key-row';
+    row.forEach((key) => {
+      const btn = document.createElement('button');
+      btn.className = 'tool-btn' + (key.danger ? ' danger' : '');
+      btn.textContent = key.label;
+      btn.type = 'button';
+
+      if (key.modifier === 'ctrl') {
+        ctrlButton = btn;
+        btn.addEventListener('click', (e) => {
+          e.preventDefault();
+          setCtrlLatched(!ctrlLatched);
+          if (term) term.focus();
+        });
+      } else if (key.action) {
+        btn.addEventListener('click', (e) => {
+          e.preventDefault();
+          if (key.action === 'pty.toggle') sendAction({ action: 'pty.toggle' });
+          if (term) term.focus();
+        });
+      } else if (key.repeat) {
+        attachRepeating(btn, key.send);
+      } else {
+        btn.addEventListener('click', (e) => { e.preventDefault(); sendKeyInput(key.send); });
+      }
+      rowEl.appendChild(btn);
+    });
+    toolbar.appendChild(rowEl);
+  });
+}
+
+// Hold-to-repeat: one press, then a steady stream until release.
+function attachRepeating(btn, payload) {
+  let initialTimer = null;
+  let intervalTimer = null;
+
+  const stop = () => {
+    clearTimeout(initialTimer); clearInterval(intervalTimer);
+    initialTimer = intervalTimer = null;
+  };
+  const start = (e) => {
+    e.preventDefault();
+    sendKeyInput(payload);
+    stop();
+    initialTimer = setTimeout(() => {
+      intervalTimer = setInterval(() => sendRaw(payload), REPEAT_INTERVAL_MS);
+    }, REPEAT_INITIAL_DELAY_MS);
+  };
+
+  btn.addEventListener('touchstart', start, { passive: false });
+  btn.addEventListener('touchend', stop);
+  btn.addEventListener('touchcancel', stop);
+  btn.addEventListener('mousedown', start);
+  btn.addEventListener('mouseup', stop);
+  btn.addEventListener('mouseleave', stop);
+}
+
+// Dynamic fitting of columns/rows to available viewport size
+function fitTerminal() {
+  if (!term) return;
+
+  const container = document.getElementById("terminal-container");
+  // clientWidth/clientHeight include the container padding. Measure the real
+  // content box so the PTY never receives columns that xterm cannot draw.
+  let horizontalPadding = 16;
+  let verticalPadding = 16;
+  try {
+    const style = window.getComputedStyle && window.getComputedStyle(container);
+    if (style) {
+      horizontalPadding = (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.paddingRight) || 0);
+      verticalPadding = (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0);
+    }
+  } catch (e) {}
+  const width = Math.max(0, container.clientWidth - horizontalPadding);
+  const height = Math.max(0, container.clientHeight - verticalPadding);
+
+  // Measure precisely using a temporary hidden character. If the webfont is
+  // still loading the measurement returns 0/0 — fall back and re-fit once
+  // document.fonts reports ready (see boot()).
+  const charMeasure = document.createElement("span");
+  charMeasure.style.fontFamily = term.options.fontFamily;
+  charMeasure.style.fontSize = term.options.fontSize + "px";
+  charMeasure.style.visibility = "hidden";
+  charMeasure.style.position = "absolute";
+  charMeasure.textContent = "A";
+  document.body.appendChild(charMeasure);
+
+  const rect = charMeasure.getBoundingClientRect();
+  // Prefer xterm's measured cell geometry. The hidden HTML span is only a
+  // fallback: browser text metrics can differ from xterm's canvas metrics,
+  // which made the PTY believe in a different column count than the screen.
+  let cell = null;
+  try { cell = term._core && term._core._renderService && term._core._renderService.dimensions.css.cell; } catch (e) {}
+  const charWidth = (cell && cell.width) || rect.width || 7.8;
+  const charHeight = (cell && cell.height) || rect.height || 18;
+  document.body.removeChild(charMeasure);
+
+  // Do not impose a desktop-sized 20-column / 5-row minimum. When an IME,
+  // toolbar, or a very small split viewport leaves less room, that old floor
+  // told Alpine the screen was larger than the xterm canvas and caused text
+  // to run under the keyboard or past the right edge.
+  const cols = Math.max(2, Math.floor(width / charWidth));
+  const rows = Math.max(1, Math.floor(height / charHeight));
+
+  if (term.cols !== cols || term.rows !== rows) {
+    term.resize(cols, rows);
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ action: "resize", cols: cols, rows: rows }));
+    }
+  }
+  // Force a repaint: after a resize (or keyboard open/close) the canvas can
+  // keep stale dimensions, making the prompt look shifted off the left edge.
+  try { term.refresh(0, term.rows - 1); } catch (e) {}
+}
+
+// Soft-keyboard-aware layout. On Android the WebView does not resize when the
+// IME opens (adjustPan-style behavior), so the input line ends up hidden
+// behind the keyboard and the "screen boundary" is ambiguous. The Visual
+// Viewport API reports the actually visible area: shrink the layout to it so
+// the banner stays on top and the prompt sits right above the keyboard, then
+// refit the terminal. Falls back to the plain resize handler elsewhere.
+function fitToVisualViewport() {
+  const vv = window.visualViewport;
+  if (!vv) return;
+  const visibleHeight = Math.max(120, Math.round(vv.height));
+  // A CSS variable keeps the complete flex shell (including xterm's mount)
+  // inside the actual IME-visible viewport. Direct body/html height writes
+  // were overwritten by CSS in some Android WebViews.
+  if (document.documentElement.style.setProperty) {
+    document.documentElement.style.setProperty('--app-height', visibleHeight + "px");
+  } else {
+    // Lightweight WebView/test DOMs may expose a plain style object.
+    document.documentElement.style['--app-height'] = visibleHeight + "px";
+  }
+  // Re-anchor to the top: with the layout sized to the visible viewport the
+  // browser no longer needs to pan the page up behind the keyboard.
+  if (window.scrollY > 0) window.scrollTo(0, 0);
+  fitTerminal();
+  // The IME opening shrinks the visible area while the cursor line usually
+  // sits at the bottom — snap there so the prompt is not hidden behind the
+  // keyboard until the first keystroke (the "keyboard covers the terminal"
+  // complaint).
+  userScrolledUp = false;
+  if (term) { try { term.scrollToBottom(); } catch (e) {} }
+}
+if (window.visualViewport) {
+  const onVisualViewportChange = () => {
+    if (resizeTimeout) clearTimeout(resizeTimeout);
+    resizeTimeout = setTimeout(fitToVisualViewport, 60);
+  };
+  window.visualViewport.addEventListener("resize", onVisualViewportChange);
+  window.visualViewport.addEventListener("scroll", onVisualViewportChange);
+}
+
+/* ------------------------------------------------------------------ *
+ * Virtual-key bar visibility (the ESC/CTRL/Tab/^C rows).
+ *
+ * The bar can steal the last terminal rows on small screens, so the
+ * topbar toggle shows/hides it. The preference survives restarts via
+ * localStorage; default stays VISIBLE (nothing the user relies on ever
+ * disappears on its own). Every toggle refits the terminal so the row
+ * count reflects the newly free space on the next render.
+ * ------------------------------------------------------------------ */
+const KEYS_BAR_PREF = 'zmux.keysBar.visible';
+
+function keysBarPreference() {
+  try { return localStorage.getItem(KEYS_BAR_PREF) !== '0'; }
+  catch (e) { return true; }   // private mode etc. -> default: visible
+}
+
+function applyKeysBar(visible) {
+  const bar = document.getElementById('toolbar');
+  const btn = document.getElementById('keys-toggle');
+  if (bar) bar.classList.toggle('hidden', !visible);
+  if (btn) btn.classList.toggle('active', visible);
+}
+
+function initKeysToggle() {
+  const btn = document.getElementById('keys-toggle');
+  applyKeysBar(keysBarPreference());
+  if (!btn) return;
+  btn.addEventListener('click', (e) => {
+    e.preventDefault();
+    const bar = document.getElementById('toolbar');
+    const visible = !bar || bar.classList.contains('hidden');
+    try { localStorage.setItem(KEYS_BAR_PREF, visible ? '1' : '0'); } catch (e) {}
+    applyKeysBar(visible);
+    // The flex layout reacts synchronously to display:none, so the
+    // refit right below already measures the final height.
+    fitTerminal();
+    if (term) term.focus();
+  });
+}
+
+// Boot sequence
+function boot() {
+  bootStatus.textContent = 'Initializing terminal UI...';
+  initTerminal();
+  buildVirtualKeys();
+  initKeysToggle();
+
+  bootStatus.textContent = 'Connecting to secure backend shell...';
+  connectWebSocket();
+}
+
+// Handle window resizing and layout changes (rotation, toolbar toggles).
+window.addEventListener('resize', () => {
+  if (resizeTimeout) clearTimeout(resizeTimeout);
+  resizeTimeout = setTimeout(fitTerminal, 150);
+});
+
+// Re-measure once the bundled fonts are actually loaded — the first fit may
+// have run with fallback metrics, which is what makes line wrapping look
+// wrong (text overflowing the visible width) right after boot.
+if (document.fonts && document.fonts.ready) {
+  document.fonts.ready.then(() => {
+    if (resizeTimeout) clearTimeout(resizeTimeout);
+    setTimeout(fitTerminal, 50);
+  });
+}
+
+// Force focus back to terminal on container click; if the connection failed
+// permanently, a tap also triggers a manual reconnect. A tap while scrolled
+// up jumps back to the live output (real terminals' "scroll to latest").
+document.getElementById('terminal-container').addEventListener('click', () => {
+  if (userScrolledUp && term) {
+    term.scrollToBottom();
+    userScrolledUp = false;
+    return;
+  }
+  if (term) term.focus();
+  if (manualRetryHandler && (!ws || ws.readyState !== WebSocket.OPEN)) {
+    manualRetryHandler();
+  }
+});
+
+// Start application
+boot();
+</script>
+</body>
+</html>
