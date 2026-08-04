@@ -3,6 +3,7 @@ pluginManagement {
         google()
         mavenCentral()
         gradlePluginPortal()
+        maven("https://chaquo.com/maven")
     }
 }
 
@@ -13,6 +14,7 @@ dependencyResolutionManagement {
         mavenCentral()
         // Termux terminal-view / terminal-emulator artifacts are published here.
         maven("https://jitpack.io")
+        maven("https://chaquo.com/maven")
     }
 }
 

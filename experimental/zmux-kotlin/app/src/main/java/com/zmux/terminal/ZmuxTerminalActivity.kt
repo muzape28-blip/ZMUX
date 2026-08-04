@@ -11,6 +11,8 @@ import androidx.appcompat.app.AppCompatActivity
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
 import com.termux.terminal.ZmuxTerminalSession
+import com.chaquo.python.Python
+import com.chaquo.python.android.AndroidPlatform
 import com.termux.view.TerminalView
 import com.zmux.terminal.widget.KeyCapView
 import com.zmux.terminal.widget.SessionTabView
@@ -39,6 +41,11 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        
+        if (!Python.isStarted()) {
+            Python.start(AndroidPlatform(this))
+        }
+
         setContentView(R.layout.activity_terminal)
 
         terminalView = findViewById(R.id.terminal_view)
