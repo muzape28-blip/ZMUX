@@ -6,8 +6,15 @@ public class TerminalSessionHelper {
         session.mShellPid = 1;
     }
     
-    public static ByteQueue getQueue(TerminalSession session) {
-        return session.mTerminalToProcessIOQueue;
+    public static int readQueue(TerminalSession session, byte[] buffer, boolean block) {
+        ByteQueue queue = session.mTerminalToProcessIOQueue;
+        if (queue == null) return -1;
+        return queue.read(buffer, block);
+    }
+
+    public static void closeQueue(TerminalSession session) {
+        ByteQueue queue = session.mTerminalToProcessIOQueue;
+        if (queue != null) queue.close();
     }
 
     public static int getColumns(TerminalEmulator emulator) {

@@ -36,9 +36,8 @@ class ZmuxTerminalSession(
         // 4. Intercept the user's keystrokes.
         readThread = Thread {
             val buffer = ByteArray(4096)
-            val queue = TerminalSessionHelper.getQueue(session)
             while (running) {
-                val bytes = runCatching { queue.read(buffer, true) }.getOrDefault(-1)
+                val bytes = runCatching { TerminalSessionHelper.readQueue(session, buffer, true) }.getOrDefault(-1)
                 if (bytes == -1) break
                 onInput?.invoke(buffer.copyOfRange(0, bytes))
             }
@@ -59,6 +58,6 @@ class ZmuxTerminalSession(
 
     fun finishIfRunning() {
         running = false
-        TerminalSessionHelper.getQueue(session).close()
+        TerminalSessionHelper.closeQueue(session)
     }
 }
