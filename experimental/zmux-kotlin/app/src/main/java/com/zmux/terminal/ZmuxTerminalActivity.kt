@@ -71,6 +71,11 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient, WebSock
 
         session = ZmuxTerminalSession(this)
         terminalView.attach(session)
+        
+        terminalView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            session.onResize?.invoke(session.columns, session.rows)
+        }
+        
         applyThemeOnce()
 
         statusPill.setState(WebSocketPtyBridge.State.IDLE, null)
@@ -197,7 +202,7 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient, WebSock
             ctrlKeyCap?.latched = false
         }
         val bytes = payload.toByteArray(Charsets.UTF_8)
-        session.write(bytes, 0, bytes.size)
+        session.session.write(bytes, 0, bytes.size)
     }
 
     // ------------------------------------------------------------- tab strip (T2)
@@ -227,6 +232,7 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient, WebSock
 
     override fun onDestroy() {
         bridge?.disconnect()
+        session.finishIfRunning()
         super.onDestroy()
     }
 

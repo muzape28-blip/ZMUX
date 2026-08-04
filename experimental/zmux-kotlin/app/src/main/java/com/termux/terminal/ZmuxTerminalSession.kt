@@ -3,90 +3,60 @@ package com.termux.terminal
 import com.zmux.terminal.ZmuxTheme
 
 /**
- * A [TerminalSession] that is NOT backed by a locally forked process.
+ * Wraps a [TerminalSession] and adapts it for remote PTY use over a WebSocket.
  *
- * The real PTY lives in the existing Python engine (`app/zmux/realpty.py`), reached over a
- * WebSocket. This class therefore:
- *
- *  - overrides [initializeEmulator] so no `fork()` / JNI PTY is created on the Android side,
- *  - forwards every byte the emulator wants to send to the "process" ([write]) to the bridge,
- *  - exposes [feed] so bytes arriving from the backend are appended to the emulator.
- *
- * Nothing about the Python PTY engine is reimplemented here — this is purely a UI-side adapter.
+ * `TerminalSession` in Termux is a `final` class that hardcodes a JNI fork() inside
+ * `initializeEmulator()`. To bypass this without forking a local process, we inject a 
+ * pre-created [TerminalEmulator] via package-private access before [updateSize] is called.
+ * This skips `initializeEmulator` entirely. We then set `mShellPid = 1` to trick `write()`
+ * into accepting user input, which we intercept from `mTerminalToProcessIOQueue`.
  */
 class ZmuxTerminalSession(
     private val client: TerminalSessionClient,
     private val transcriptRows: Int = 2000,
-) : TerminalSession(
-    /* shellPath = */ "/system/bin/sh",
-    /* cwd = */ "/",
-    /* args = */ arrayOf(),
-    /* env = */ arrayOf(),
-    /* transcriptRows = */ transcriptRows,
-    /* client = */ client,
 ) {
+    val session = TerminalSession("/system/bin/sh", "/", arrayOf(), arrayOf(), transcriptRows, client)
 
-    /** Set by [WebSocketPtyBridge]; receives user keystrokes as raw bytes. */
     var onInput: ((ByteArray) -> Unit)? = null
-
-    /** Set by [WebSocketPtyBridge]; receives terminal resize events (cols, rows). */
     var onResize: ((Int, Int) -> Unit)? = null
 
     private var running = true
+    private var readThread: Thread? = null
 
-    override fun initializeEmulator(columns: Int, rows: Int) {
-        // Deliberately does not call TerminalSession#initializeEmulator(), which would fork a
-        // local shell through the Termux JNI PTY. We only need the emulator/screen buffer.
-        mEmulator = TerminalEmulator(this, columns, rows, transcriptRows, mClient)
-        // Paint the ZMUX Ember palette the moment the buffer exists, so the very first
-        // byte of output already renders in-theme.
-        ZmuxTheme.applyTo(mEmulator)
-        onResize?.invoke(columns, rows)
-        client.onTextChanged(this)
+    init {
+        // 1. Bypass the JNI fork by pre-seeding the emulator.
+        session.mEmulator = TerminalEmulator(session, 80, 24, transcriptRows, client)
+        
+        // 2. Apply theme immediately.
+        ZmuxTheme.applyTo(session.mEmulator)
+        
+        // 3. Trick TerminalSession.write() into NOT discarding input.
+        session.mShellPid = 1 
+
+        // 4. Intercept the user's keystrokes.
+        readThread = Thread {
+            val buffer = ByteArray(4096)
+            while (running) {
+                val bytes = runCatching { session.mTerminalToProcessIOQueue.read(buffer, true) }.getOrDefault(-1)
+                if (bytes == -1) break
+                onInput?.invoke(buffer.copyOfRange(0, bytes))
+            }
+        }.apply { start() }
     }
 
-    override fun updateSize(columns: Int, rows: Int) {
-        val emulator = mEmulator
-        if (emulator == null) {
-            initializeEmulator(columns, rows)
-            return
-        }
-        if (emulator.mColumns == columns && emulator.mRows == rows) return
-        emulator.resize(columns, rows)
-        onResize?.invoke(columns, rows)
-    }
-
-    /** Called by the emulator with user input destined for the remote PTY. */
-    override fun write(data: ByteArray?, offset: Int, count: Int) {
-        if (data == null || count <= 0) return
-        onInput?.invoke(data.copyOfRange(offset, offset + count))
-    }
-
-    override fun write(data: String?) {
-        if (data.isNullOrEmpty()) return
-        val bytes = data.toByteArray(Charsets.UTF_8)
-        write(bytes, 0, bytes.size)
-    }
-
-    /** Feed output coming from the backend PTY into the emulator. */
     fun feed(bytes: ByteArray) {
-        val emulator = mEmulator ?: return
-        emulator.append(bytes, bytes.size)
-        client.onTextChanged(this)
+        session.mEmulator?.append(bytes, bytes.size)
+        client.onTextChanged(session)
     }
 
-    /** Convenience for status/banner lines rendered locally (connection notices, errors). */
-    fun feedLine(text: String) = feed(("\r\n" + text + "\r\n").toByteArray(Charsets.UTF_8))
+    fun feedLine(text: String) = feed(("\r\n$text\r\n").toByteArray(Charsets.UTF_8))
 
-    override fun isRunning(): Boolean = running
+    val emulator: TerminalEmulator? get() = session.mEmulator
+    val columns: Int get() = session.mEmulator?.mColumns ?: 80
+    val rows: Int get() = session.mEmulator?.mRows ?: 24
 
-    override fun finishIfRunning() {
+    fun finishIfRunning() {
         running = false
+        session.mTerminalToProcessIOQueue.close()
     }
-
-    /** The screen buffer, once [initializeEmulator] has run. Used to apply [ZmuxTheme]. */
-    val emulator: TerminalEmulator? get() = mEmulator
-
-    val columns: Int get() = mEmulator?.mColumns ?: 80
-    val rows: Int get() = mEmulator?.mRows ?: 24
 }

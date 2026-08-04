@@ -21,8 +21,8 @@ class ZmuxTerminalView @JvmOverloads constructor(
         isFocusableInTouchMode = true
     }
 
-    fun attach(session: TerminalSession) {
-        attachSession(session)
+    fun attach(session: com.termux.terminal.ZmuxTerminalSession) {
+        attachSession(session.session)
         requestFocus()
     }
 
