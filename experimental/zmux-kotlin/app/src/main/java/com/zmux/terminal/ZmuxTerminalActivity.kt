@@ -13,6 +13,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
+import com.termux.terminal.ZmuxTerminalSession
 import com.termux.view.TerminalView
 import com.zmux.terminal.widget.BootBrandView
 import com.zmux.terminal.widget.KeyCapView
