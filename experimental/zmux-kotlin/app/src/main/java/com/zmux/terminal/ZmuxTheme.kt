@@ -100,9 +100,12 @@ object ZmuxTheme {
      * down with it.
      */
     fun applyTo(emulator: TerminalEmulator?): Boolean {
-        val colors = emulator?.mColors ?: return false
+        if (emulator == null) return false
         return runCatching {
-            val slots = colors.mCurrentColors
+            val mColorsField = emulator.javaClass.getDeclaredField("mColors").apply { isAccessible = true }
+            val colorsObj = mColorsField.get(emulator) ?: return false
+            val mCurrentColorsField = colorsObj.javaClass.getDeclaredField("mCurrentColors").apply { isAccessible = true }
+            val slots = mCurrentColorsField.get(colorsObj) as IntArray
             for (i in ANSI_16.indices) {
                 if (i < slots.size) slots[i] = ANSI_16[i]
             }

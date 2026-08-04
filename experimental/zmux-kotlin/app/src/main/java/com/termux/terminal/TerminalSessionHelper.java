@@ -1,27 +1,73 @@
 package com.termux.terminal;
 
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+
 public class TerminalSessionHelper {
     public static void injectEmulator(TerminalSession session, TerminalEmulator emulator) {
-        session.mEmulator = emulator;
-        session.mShellPid = 1;
+        try {
+            Field emulatorField = TerminalSession.class.getDeclaredField("mEmulator");
+            emulatorField.setAccessible(true);
+            emulatorField.set(session, emulator);
+
+            Field pidField = TerminalSession.class.getDeclaredField("mShellPid");
+            pidField.setAccessible(true);
+            pidField.set(session, 1);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
     }
     
     public static int readQueue(TerminalSession session, byte[] buffer, boolean block) {
-        ByteQueue queue = session.mTerminalToProcessIOQueue;
-        if (queue == null) return -1;
-        return queue.read(buffer, block);
+        try {
+            Field queueField = TerminalSession.class.getDeclaredField("mTerminalToProcessIOQueue");
+            queueField.setAccessible(true);
+            Object queue = queueField.get(session);
+            if (queue != null) {
+                Method readMethod = queue.getClass().getDeclaredMethod("read", byte[].class, boolean.class);
+                readMethod.setAccessible(true);
+                return (Integer) readMethod.invoke(queue, buffer, block);
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return -1;
     }
 
     public static void closeQueue(TerminalSession session) {
-        ByteQueue queue = session.mTerminalToProcessIOQueue;
-        if (queue != null) queue.close();
+        try {
+            Field queueField = TerminalSession.class.getDeclaredField("mTerminalToProcessIOQueue");
+            queueField.setAccessible(true);
+            Object queue = queueField.get(session);
+            if (queue != null) {
+                Method closeMethod = queue.getClass().getDeclaredMethod("close");
+                closeMethod.setAccessible(true);
+                closeMethod.invoke(queue);
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
     }
 
     public static int getColumns(TerminalEmulator emulator) {
-        return emulator != null ? emulator.mColumns : 80;
+        if (emulator == null) return 80;
+        try {
+            Field f = TerminalEmulator.class.getDeclaredField("mColumns");
+            f.setAccessible(true);
+            return f.getInt(emulator);
+        } catch (Exception e) {
+            return 80;
+        }
     }
 
     public static int getRows(TerminalEmulator emulator) {
-        return emulator != null ? emulator.mRows : 24;
+        if (emulator == null) return 24;
+        try {
+            Field f = TerminalEmulator.class.getDeclaredField("mRows");
+            f.setAccessible(true);
+            return f.getInt(emulator);
+        } catch (Exception e) {
+            return 24;
+        }
     }
 }
