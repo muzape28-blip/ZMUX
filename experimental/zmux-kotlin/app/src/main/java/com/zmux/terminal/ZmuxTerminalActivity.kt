@@ -79,13 +79,13 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
         // Sapaan / Welcome Message (Jujur dan No Mock)
         val esc = 27.toChar()
         val welcome = """
-            ${esc}[33m=================================================${esc}[0m
-            ${esc}[32m WELCOME TO ZMUX, FEEL FREE TO EXEC COMMAND...${esc}[0m
-            
-             (Note: The Alpine/Debian setup via linux-setup
-              is coming soon in the next ZABAWHEELS phase)
-            ${esc}[33m=================================================${esc}[0m
-        """.trimIndent()
+${esc}[33m=================================================${esc}[0m
+${esc}[32mWELCOME TO ZMUX, FEEL FREE TO EXEC COMMAND...${esc}[0m
+
+(Note: The Alpine/Debian setup via linux-setup
+is coming soon in the next ZABAWHEELS phase)
+${esc}[33m=================================================${esc}[0m
+""".trimIndent()
         newSession.feedLine(welcome)
         
         sessions.add(newSession)
