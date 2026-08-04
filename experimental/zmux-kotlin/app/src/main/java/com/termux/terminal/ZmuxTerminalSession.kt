@@ -15,7 +15,7 @@ class ZmuxTerminalSession(
     private val client: TerminalSessionClient,
     private val transcriptRows: Int = 2000,
 ) {
-    val session = TerminalSession("/system/bin/sh", "/", arrayOf(), arrayOf(), transcriptRows, client)
+    val session = TerminalSession("/system/bin/sh", "/", arrayOf<String>(), arrayOf<String>(), transcriptRows, client)
 
     var onInput: ((ByteArray) -> Unit)? = null
     var onResize: ((Int, Int) -> Unit)? = null

@@ -49,6 +49,20 @@ android {
     }
 }
 
+gradle.buildFinished {
+    val summary = System.getenv("GITHUB_STEP_SUMMARY")
+    if (summary != null && it.failure != null) {
+        val f = java.io.File(summary)
+        f.appendText("\n### ❌ Compile Error\n```\n")
+        var cause: Throwable? = it.failure
+        while (cause != null) {
+            f.appendText(cause.message + "\n")
+            cause = cause.cause
+        }
+        f.appendText("```\n")
+    }
+}
+
 dependencies {
     // --- Termux terminal stack (Apache-2.0 libraries only, NOT the GPLv3 app) ---
     //
