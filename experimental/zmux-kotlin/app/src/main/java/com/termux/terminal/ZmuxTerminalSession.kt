@@ -1,5 +1,6 @@
 package com.termux.terminal
 
+import android.content.Context
 import com.zmux.terminal.ZmuxTheme
 
 /**
@@ -17,7 +18,8 @@ class ZmuxTerminalSession(
     val isLocalMode: Boolean = false,
 ) {
     val session = if (isLocalMode) {
-        TerminalSessionHelper.createLocalSession(client)
+        val filesDir = (client as Context).filesDir.absolutePath
+        TerminalSessionHelper.createLocalSession(client, filesDir)
     } else {
         TerminalSession("/system/bin/sh", "/", arrayOf<String>(), arrayOf<String>(), transcriptRows, client)
     }

@@ -49,13 +49,28 @@ public class TerminalSessionHelper {
         }
     }
 
-    public static TerminalSession createLocalSession(TerminalSessionClient client) {
+    public static TerminalSession createLocalSession(TerminalSessionClient client, String filesDir) {
+        java.io.File dir = new java.io.File(filesDir);
+        if (!dir.exists()) {
+            dir.mkdirs();
+        }
+
+        try {
+            java.io.File rc = new java.io.File(dir, ".zmuxrc");
+            java.io.FileWriter fw = new java.io.FileWriter(rc);
+            fw.write("export PS1='\\033[32mzmux\\033[0m~\\033[34m:\\033[0m$ '\n");
+            fw.write("alias ls='ls --color=auto'\n");
+            fw.close();
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+
         String[] env = new String[] {
-            "HOME=/data/data/com.zmux.terminal/files",
-            "PATH=/system/bin:/system/xbin",
-            "PS1=\\u001b[32mzmux\\u001b[0m~\\u001b[34m:\\u001b[0m$ "
+            "HOME=" + filesDir,
+            "PATH=/system/bin:/system/xbin:/vendor/bin",
+            "ENV=" + filesDir + "/.zmuxrc"
         };
-        return new TerminalSession("/system/bin/sh", "/data/data/com.zmux.terminal/files", new String[0], env, 2000, client);
+        return new TerminalSession("/system/bin/sh", filesDir, new String[0], env, 2000, client);
     }
     
     public static TerminalEmulator getEmulator(TerminalSession session) {
