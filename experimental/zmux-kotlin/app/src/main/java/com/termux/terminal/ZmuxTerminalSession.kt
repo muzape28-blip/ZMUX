@@ -16,7 +16,11 @@ class ZmuxTerminalSession(
     private val transcriptRows: Int = 2000,
     val isLocalMode: Boolean = false,
 ) {
-    val session = TerminalSession("/system/bin/sh", "/", arrayOf<String>(), arrayOf<String>(), transcriptRows, client)
+    val session = if (isLocalMode) {
+        TerminalSessionHelper.createLocalSession(client)
+    } else {
+        TerminalSession("/system/bin/sh", "/", arrayOf<String>(), arrayOf<String>(), transcriptRows, client)
+    }
 
     var onInput: ((ByteArray) -> Unit)? = null
     var onResize: ((Int, Int) -> Unit)? = null
@@ -26,13 +30,6 @@ class ZmuxTerminalSession(
 
     init {
         if (isLocalMode) {
-            val appFilesDir = client.javaClass.classLoader?.getResource("")?.path?.substringBefore("/app/") ?: "/"
-            session.mCwd = "/data/data/com.zmux.terminal/files"
-            session.mEnv = arrayOf(
-                "HOME=${session.mCwd}", 
-                "PATH=/system/bin:/system/xbin",
-                "PS1=\\u001b[32mzmux\\u001b[0m~\\u001b[34m:\\u001b[0m\$ "
-            )
             session.initializeEmulator(80, 24)
             ZmuxTheme.applyTo(TerminalSessionHelper.getEmulator(session))
         } else {

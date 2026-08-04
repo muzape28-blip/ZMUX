@@ -49,6 +49,15 @@ public class TerminalSessionHelper {
         }
     }
 
+    public static TerminalSession createLocalSession(TerminalSessionClient client) {
+        String[] env = new String[] {
+            "HOME=/data/data/com.zmux.terminal/files",
+            "PATH=/system/bin:/system/xbin",
+            "PS1=\\u001b[32mzmux\\u001b[0m~\\u001b[34m:\\u001b[0m$ "
+        };
+        return new TerminalSession("/system/bin/sh", "/data/data/com.zmux.terminal/files", new String[0], env, 2000, client);
+    }
+    
     public static TerminalEmulator getEmulator(TerminalSession session) {
         try {
             Field f = TerminalSession.class.getDeclaredField("mEmulator");
