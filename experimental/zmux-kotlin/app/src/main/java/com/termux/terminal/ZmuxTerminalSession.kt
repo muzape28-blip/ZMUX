@@ -14,6 +14,7 @@ import com.zmux.terminal.ZmuxTheme
 class ZmuxTerminalSession(
     private val client: TerminalSessionClient,
     private val transcriptRows: Int = 2000,
+    val isLocalMode: Boolean = false,
 ) {
     val session = TerminalSession("/system/bin/sh", "/", arrayOf<String>(), arrayOf<String>(), transcriptRows, client)
 
@@ -24,24 +25,29 @@ class ZmuxTerminalSession(
     private var readThread: Thread? = null
 
     init {
-        // 1. Bypass the JNI fork by pre-seeding the emulator.
-        val emulator = TerminalEmulator(session, 80, 24, transcriptRows, client)
-        
-        // 2. Apply theme immediately.
-        ZmuxTheme.applyTo(emulator)
-        
-        // 3. Trick TerminalSession.write() into NOT discarding input, and inject emulator
-        TerminalSessionHelper.injectEmulator(session, emulator)
+        if (isLocalMode) {
+            session.initializeEmulator(80, 24)
+            ZmuxTheme.applyTo(TerminalSessionHelper.getEmulator(session))
+        } else {
+            // 1. Bypass the JNI fork by pre-seeding the emulator.
+            val emulator = TerminalEmulator(session, 80, 24, transcriptRows, client)
+            
+            // 2. Apply theme immediately.
+            ZmuxTheme.applyTo(emulator)
+            
+            // 3. Trick TerminalSession.write() into NOT discarding input, and inject emulator
+            TerminalSessionHelper.injectEmulator(session, emulator)
 
-        // 4. Intercept the user's keystrokes.
-        readThread = Thread {
-            val buffer = ByteArray(4096)
-            while (running) {
-                val bytes = runCatching { TerminalSessionHelper.readQueue(session, buffer, true) }.getOrDefault(-1)
-                if (bytes == -1) break
-                onInput?.invoke(buffer.copyOfRange(0, bytes))
-            }
-        }.apply { start() }
+            // 4. Intercept the user's keystrokes.
+            readThread = Thread {
+                val buffer = ByteArray(4096)
+                while (running) {
+                    val bytes = runCatching { TerminalSessionHelper.readQueue(session, buffer, true) }.getOrDefault(-1)
+                    if (bytes == -1) break
+                    onInput?.invoke(buffer.copyOfRange(0, bytes))
+                }
+            }.apply { start() }
+        }
     }
 
     fun feed(bytes: ByteArray) {

@@ -47,6 +47,7 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient, WebSock
     private var bridge: WebSocketPtyBridge? = null
     private var ctrlKeyCap: KeyCapView? = null
     private var themeApplied = false
+    private var isLocalSession = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -110,15 +111,31 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient, WebSock
     }
 
     private fun toggleConnection() {
-        bridge?.let {
-            it.disconnect()
+        if (bridge != null || isLocalSession) {
+            bridge?.disconnect()
             bridge = null
+            isLocalSession = false
             linkButton.text = getString(R.string.connect)
             showBootOverlay(true)
             return
         }
 
         val host = hostInput.text.toString().trim().ifEmpty { "127.0.0.1" }
+        
+        if (host.lowercase() == "local") {
+            // Secret local mode for testing without a backend!
+            isLocalSession = true
+            session.finishIfRunning()
+            session = com.termux.terminal.ZmuxTerminalSession(this, isLocalMode = true)
+            terminalView.attachSession(session.session)
+            themeApplied = false
+            applyThemeOnce()
+            showBootOverlay(false)
+            linkButton.text = getString(R.string.disconnect)
+            statusPill.setState(WebSocketPtyBridge.State.CONNECTED, "local shell")
+            return
+        }
+
         val port = portInput.text.toString().trim().toIntOrNull() ?: ZmuxProtocol.DEFAULT_WS_PORT
         val token = tokenInput.text.toString().trim()
 
