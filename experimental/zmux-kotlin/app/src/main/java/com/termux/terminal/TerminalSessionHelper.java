@@ -63,6 +63,7 @@ public class TerminalSessionHelper {
             char esc = (char) 27;
             fw.write("export PS1='" + esc + "[32mzmux" + esc + "[0m~" + esc + "[34m:" + esc + "[0m$ '\n");
             fw.write("alias ls='ls --color=auto'\n");
+            fw.write("alias clear='clear; printf \"\\033[3J\"'\n");
             fw.close();
         } catch (Exception e) {
             e.printStackTrace();
