@@ -5,6 +5,8 @@
     android:background="@color/zmux_bg"
     android:orientation="vertical">
 
+    <!-- Connect bar: host / port / token. Port and token are runtime values on the
+         Python side (server.py picks the port, security.py generates the token). -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -13,13 +15,35 @@
         android:padding="4dp">
 
         <EditText
-            android:id="@+id/url_input"
+            android:id="@+id/host_input"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:hint="@string/ws_url_hint"
+            android:layout_weight="3"
+            android:hint="@string/host_hint"
             android:importantForAutofill="no"
-            android:inputType="textUri"
+            android:inputType="text"
+            android:textColor="@color/zmux_fg"
+            android:textSize="12sp" />
+
+        <EditText
+            android:id="@+id/port_input"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1.4"
+            android:hint="@string/port_hint"
+            android:importantForAutofill="no"
+            android:inputType="number"
+            android:textColor="@color/zmux_fg"
+            android:textSize="12sp" />
+
+        <EditText
+            android:id="@+id/token_input"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="3"
+            android:hint="@string/token_hint"
+            android:importantForAutofill="no"
+            android:inputType="textPassword"
             android:textColor="@color/zmux_fg"
             android:textSize="12sp" />
 
@@ -42,6 +66,34 @@
         android:textSize="11sp"
         android:visibility="gone" />
 
+    <!-- Session tabs, driven by the backend's {"type":"sessions"} frames. -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@color/zmux_bar"
+        android:orientation="horizontal">
+
+        <HorizontalScrollView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:scrollbars="none">
+
+            <LinearLayout
+                android:id="@+id/tab_strip"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal" />
+        </HorizontalScrollView>
+
+        <Button
+            android:id="@+id/new_session_button"
+            style="?android:attr/buttonStyleSmall"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/new_session" />
+    </LinearLayout>
+
     <com.zmux.terminal.ZmuxTerminalView
         android:id="@+id/terminal_view"
         android:layout_width="match_parent"
@@ -49,27 +101,11 @@
         android:layout_weight="1"
         android:background="@color/zmux_bg" />
 
-    <HorizontalScrollView
+    <!-- Virtual keys are built in code from ZmuxKeys.ROWS (ported from terminal.html). -->
+    <LinearLayout
+        android:id="@+id/virtual_keys"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:background="@color/zmux_bar"
-        android:scrollbars="none">
-
-        <LinearLayout
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal">
-
-            <Button android:id="@+id/key_esc" style="?android:attr/buttonStyleSmall" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="ESC" />
-            <Button android:id="@+id/key_ctrl" style="?android:attr/buttonStyleSmall" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="CTRL" />
-            <Button android:id="@+id/key_alt" style="?android:attr/buttonStyleSmall" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="ALT" />
-            <Button android:id="@+id/key_tab" style="?android:attr/buttonStyleSmall" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="TAB" />
-            <Button android:id="@+id/key_ctrl_c" style="?android:attr/buttonStyleSmall" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="^C" />
-            <Button android:id="@+id/key_left" style="?android:attr/buttonStyleSmall" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="←" />
-            <Button android:id="@+id/key_down" style="?android:attr/buttonStyleSmall" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="↓" />
-            <Button android:id="@+id/key_up" style="?android:attr/buttonStyleSmall" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="↑" />
-            <Button android:id="@+id/key_right" style="?android:attr/buttonStyleSmall" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="→" />
-            <Button android:id="@+id/key_kb" style="?android:attr/buttonStyleSmall" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="KB" />
-        </LinearLayout>
-    </HorizontalScrollView>
+        android:orientation="vertical" />
 </LinearLayout>

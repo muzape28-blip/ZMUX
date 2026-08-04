@@ -1,6 +1,9 @@
 <resources>
     <string name="app_name">ZMUX Terminal</string>
     <string name="connect">Connect</string>
-    <string name="disconnect">Disconnect</string>
-    <string name="ws_url_hint">ws://127.0.0.1:8001/ws</string>
+    <string name="disconnect">Close</string>
+    <string name="new_session">+</string>
+    <string name="host_hint">127.0.0.1</string>
+    <string name="port_hint">8001</string>
+    <string name="token_hint">auth token</string>
 </resources>

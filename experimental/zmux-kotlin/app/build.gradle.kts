@@ -51,9 +51,15 @@ android {
 
 dependencies {
     // --- Termux terminal stack (Apache-2.0 libraries only, NOT the GPLv3 app) ---
-    // Published from termux/termux-app via JitPack.
-    implementation("com.termux.termux-app:terminal-view:v0.118.0")
-    implementation("com.termux.termux-app:terminal-emulator:v0.118.0")
+    //
+    // Coordinates per termux-app's "Termux Libraries" wiki page:
+    //   * JitPack groupId is `com.termux.termux-app`
+    //   * `com.termux` also resolves (termux.com carries the JitPack DNS TXT record)
+    //   * terminal-emulator is a transitive dep of terminal-view, but we pin it
+    //     explicitly so a version skew fails at resolution instead of at runtime.
+    // Versions >= 0.116 are published; 0.118.0 is the last stable tag.
+    implementation("com.termux.termux-app:terminal-view:0.118.0")
+    implementation("com.termux.termux-app:terminal-emulator:0.118.0")
 
     // --- Transport to the existing Python ZMUX backend ---
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
