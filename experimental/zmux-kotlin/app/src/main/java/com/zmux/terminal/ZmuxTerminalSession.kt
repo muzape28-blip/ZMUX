@@ -40,6 +40,9 @@ class ZmuxTerminalSession(
         // Deliberately does not call TerminalSession#initializeEmulator(), which would fork a
         // local shell through the Termux JNI PTY. We only need the emulator/screen buffer.
         mEmulator = TerminalEmulator(this, columns, rows, transcriptRows)
+        // Paint the ZMUX Ember palette the moment the buffer exists, so the very first
+        // byte of output already renders in-theme.
+        ZmuxTheme.applyTo(mEmulator)
         onResize?.invoke(columns, rows)
         client.onTextChanged(this)
     }
@@ -82,6 +85,9 @@ class ZmuxTerminalSession(
     override fun finishIfRunning() {
         running = false
     }
+
+    /** The screen buffer, once [initializeEmulator] has run. Used to apply [ZmuxTheme]. */
+    val emulator: TerminalEmulator? get() = mEmulator
 
     val columns: Int get() = mEmulator?.mColumns ?: 80
     val rows: Int get() = mEmulator?.mRows ?: 24

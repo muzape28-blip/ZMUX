@@ -1,9 +1,12 @@
 <resources>
-    <string name="app_name">ZMUX Terminal</string>
-    <string name="connect">Connect</string>
-    <string name="disconnect">Close</string>
+    <string name="app_name">ZMUX</string>
+    <string name="brand">ZMUX</string>
+    <string name="connect">connect</string>
+    <string name="disconnect">detach</string>
+    <string name="attach">ATTACH SESSION</string>
     <string name="new_session">+</string>
     <string name="host_hint">127.0.0.1</string>
     <string name="port_hint">8001</string>
     <string name="token_hint">auth token</string>
+    <string name="boot_hint">Token is generated at runtime by security.py.\nadb shell run-as &lt;pkg&gt; cat files/.zmux_auth_token</string>
 </resources>

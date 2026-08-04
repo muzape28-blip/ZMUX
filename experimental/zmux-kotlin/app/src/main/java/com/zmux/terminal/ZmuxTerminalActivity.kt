@@ -1,16 +1,10 @@
 package com.zmux.terminal
 
 import android.content.Context
-import android.graphics.Color
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
-import android.view.Gravity
-import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.InputMethodManager
-import android.widget.Button
 import android.widget.EditText
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
@@ -19,43 +13,54 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
+import com.zmux.terminal.widget.BootBrandView
+import com.zmux.terminal.widget.KeyCapView
+import com.zmux.terminal.widget.SessionTabView
+import com.zmux.terminal.widget.StatusPillView
 
 /**
- * Native Kotlin replacement for the WebView + xterm.js terminal.
+ * Native Kotlin terminal for ZMUX, styled as **ZMUX Ember** (see [ZmuxTheme]).
  *
- * Feature parity targets taken from `app/templates/terminal.html`:
- *  - real PTY output via binary WebSocket frames
- *  - `action`-based resize / session control
- *  - session tab strip driven by `{"type":"sessions"}`
- *  - data-driven virtual key row with sticky CTRL and hold-to-repeat
+ * Functionally a peer of the WebView UI — same PTY, same protocol, same key table — but the
+ * presentation is its own: true-black field, ember/teal duotone, hand-drawn tabs and keycaps,
+ * and a boot overlay that doubles as the connect form instead of a separate top bar.
  */
 class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient, WebSocketPtyBridge.Listener {
 
     private lateinit var terminalView: ZmuxTerminalView
-    private lateinit var statusView: TextView
+    private lateinit var statusPill: StatusPillView
     private lateinit var hostInput: EditText
     private lateinit var portInput: EditText
     private lateinit var tokenInput: EditText
-    private lateinit var connectButton: Button
+    private lateinit var linkButton: TextView
+    private lateinit var bootConnect: TextView
+    private lateinit var bootOverlay: View
+    private lateinit var bootBrand: BootBrandView
     private lateinit var tabStrip: LinearLayout
+    private lateinit var newSessionButton: TextView
+
     private lateinit var session: ZmuxTerminalSession
     private lateinit var viewClient: ZmuxViewClient
 
     private var bridge: WebSocketPtyBridge? = null
-    private var ctrlButton: Button? = null
-    private val handler = Handler(Looper.getMainLooper())
+    private var ctrlKeyCap: KeyCapView? = null
+    private var themeApplied = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_terminal)
 
         terminalView = findViewById(R.id.terminal_view)
-        statusView = findViewById(R.id.status_view)
+        statusPill = findViewById(R.id.status_pill)
         hostInput = findViewById(R.id.host_input)
         portInput = findViewById(R.id.port_input)
         tokenInput = findViewById(R.id.token_input)
-        connectButton = findViewById(R.id.connect_button)
+        linkButton = findViewById(R.id.link_button)
+        bootConnect = findViewById(R.id.boot_connect)
+        bootOverlay = findViewById(R.id.boot_overlay)
+        bootBrand = findViewById(R.id.boot_brand)
         tabStrip = findViewById(R.id.tab_strip)
+        newSessionButton = findViewById(R.id.new_session_button)
 
         restoreConnectionFields()
 
@@ -65,13 +70,21 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient, WebSock
 
         session = ZmuxTerminalSession(this)
         terminalView.attach(session)
+        applyThemeOnce()
 
-        session.feedLine("ZMUX Kotlin UI (PoC) — native TerminalView over the Python PTY engine.")
-        session.feedLine("Start the backend, then press Connect.")
+        statusPill.setState(WebSocketPtyBridge.State.IDLE, null)
 
-        connectButton.setOnClickListener { toggleConnection() }
-        findViewById<Button>(R.id.new_session_button).setOnClickListener { bridge?.newSession() }
+        linkButton.setOnClickListener { toggleConnection() }
+        bootConnect.setOnClickListener { toggleConnection() }
+        newSessionButton.setOnClickListener { bridge?.newSession() }
+
         buildVirtualKeys()
+    }
+
+    /** Repaint the emulator palette once it exists. */
+    private fun applyThemeOnce() {
+        if (themeApplied) return
+        themeApplied = ZmuxTheme.applyTo(session.emulator)
     }
 
     // ------------------------------------------------------------------ connect
@@ -79,19 +92,19 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient, WebSock
         val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         hostInput.setText(prefs.getString(KEY_HOST, "127.0.0.1"))
         portInput.setText(prefs.getInt(KEY_PORT, ZmuxProtocol.DEFAULT_WS_PORT).toString())
-
-        // Token: intent extra > same-APK token file > saved value.
-        val token = intent.getStringExtra(EXTRA_TOKEN)
-            ?: ZmuxBackendLocator.findToken(this, intent.getStringExtra(EXTRA_ZMUX_PACKAGE))
-            ?: prefs.getString(KEY_TOKEN, "")
-        tokenInput.setText(token)
+        tokenInput.setText(
+            intent.getStringExtra(EXTRA_TOKEN)
+                ?: ZmuxBackendLocator.findToken(this, intent.getStringExtra(EXTRA_ZMUX_PACKAGE))
+                ?: prefs.getString(KEY_TOKEN, "")
+        )
     }
 
     private fun toggleConnection() {
         bridge?.let {
             it.disconnect()
             bridge = null
-            connectButton.text = getString(R.string.connect)
+            linkButton.text = getString(R.string.connect)
+            showBootOverlay(true)
             return
         }
 
@@ -100,9 +113,7 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient, WebSock
         val token = tokenInput.text.toString().trim()
 
         if (token.isEmpty()) {
-            session.feedLine("[zmux] No auth token. ws_server rejects the handshake with 401.")
-            session.feedLine("[zmux] Get it via: adb shell run-as <pkg> cat files/.zmux_auth_token")
-            Toast.makeText(this, "Auth token required", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Auth token required — ws_server replies 401", Toast.LENGTH_LONG).show()
             return
         }
 
@@ -115,8 +126,19 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient, WebSock
             this,
         ).also { it.connect() }
 
-        connectButton.text = getString(R.string.disconnect)
-        showKeyboard()
+        linkButton.text = getString(R.string.disconnect)
+    }
+
+    private fun showBootOverlay(visible: Boolean) {
+        if (visible) {
+            bootOverlay.alpha = 1f
+            bootOverlay.visibility = View.VISIBLE
+        } else if (bootOverlay.visibility == View.VISIBLE) {
+            bootOverlay.animate().alpha(0f).setDuration(220L).withEndAction {
+                bootOverlay.visibility = View.GONE
+                showKeyboard()
+            }.start()
+        }
     }
 
     // ------------------------------------------------------- virtual keys (T3)
@@ -126,15 +148,12 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient, WebSock
 
         for (row in ZmuxKeys.ROWS) {
             val rowView = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-            for (key in row) {
-                rowView.addView(makeKeyButton(key))
-            }
-            val scroll = HorizontalScrollView(this).apply {
-                isHorizontalScrollBarEnabled = false
-                addView(rowView)
-            }
+            for (key in row) rowView.addView(makeKeyCap(key))
             container.addView(
-                scroll,
+                HorizontalScrollView(this).apply {
+                    isHorizontalScrollBarEnabled = false
+                    addView(rowView)
+                },
                 LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -143,115 +162,60 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient, WebSock
         }
     }
 
-    private fun makeKeyButton(key: ZmuxKeys.Key): Button {
-        val button = Button(this, null, android.R.attr.buttonStyleSmall).apply {
-            text = key.label
-            isAllCaps = false
-            minWidth = 0
-            minimumWidth = 0
-            setPadding(20, 6, 20, 6)
-            if (key.danger) setTextColor(Color.parseColor("#FF8A80"))
-        }
+    private fun makeKeyCap(key: ZmuxKeys.Key): KeyCapView = KeyCapView(this).apply {
+        label = key.label
+        danger = key.danger
+        repeatable = key.repeat
 
         when {
             key.modifier == "ctrl" -> {
-                ctrlButton = button
-                button.setOnClickListener {
+                ctrlKeyCap = this
+                onFire = {
                     viewClient.ctrlDown = !viewClient.ctrlDown
-                    updateCtrlButton()
+                    latched = viewClient.ctrlDown
                     terminalView.requestFocus()
                 }
             }
 
-            key.action != null -> button.setOnClickListener {
+            key.action != null -> onFire = {
                 if (key.action == "pty.toggle") bridge?.togglePty()
                 terminalView.requestFocus()
             }
 
-            key.repeat -> attachRepeat(button, key.send.orEmpty())
-
-            else -> button.setOnClickListener { sendKeyInput(key.send.orEmpty()) }
-        }
-        return button
-    }
-
-    /** Hold-to-repeat, matching terminal.html's 400 ms / 55 ms timings. */
-    private fun attachRepeat(button: Button, text: String) {
-        var repeater: Runnable? = null
-        button.setOnTouchListener { view, event ->
-            when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN -> {
-                    sendKeyInput(text)
-                    val tick = object : Runnable {
-                        override fun run() {
-                            sendKeyInput(text)
-                            handler.postDelayed(this, ZmuxKeys.REPEAT_INTERVAL_MS)
-                        }
-                    }
-                    repeater = tick
-                    handler.postDelayed(tick, ZmuxKeys.REPEAT_INITIAL_DELAY_MS)
-                    view.isPressed = true
-                    true
-                }
-
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    repeater?.let { handler.removeCallbacks(it) }
-                    repeater = null
-                    view.isPressed = false
-                    view.performClick()
-                    true
-                }
-
-                else -> false
-            }
+            else -> onFire = { sendKeyInput(key.send.orEmpty()) }
         }
     }
 
-    /** Route input through the CTRL latch, exactly like `sendKeyInput()` in terminal.html. */
+    /** Route input through the CTRL latch, mirroring `sendKeyInput()` in terminal.html. */
     private fun sendKeyInput(text: String) {
         if (text.isEmpty()) return
         var payload = text
         if (viewClient.ctrlDown) {
             ZmuxKeys.toControlCode(text)?.let { payload = it }
             viewClient.ctrlDown = false
-            updateCtrlButton()
+            ctrlKeyCap?.latched = false
         }
         val bytes = payload.toByteArray(Charsets.UTF_8)
         session.write(bytes, 0, bytes.size)
-    }
-
-    private fun updateCtrlButton() {
-        ctrlButton?.setTextColor(
-            if (viewClient.ctrlDown) Color.parseColor("#7FDBFF") else Color.WHITE
-        )
     }
 
     // ------------------------------------------------------------- tab strip (T2)
     private fun renderTabs(state: ZmuxProtocol.SessionsState) {
         tabStrip.removeAllViews()
         for (info in state.sessions) {
-            val active = info.id == state.active
-            val label = buildString {
-                append(if (info.busy) "● " else "")
-                append(info.id)
-            }
-            val tab = Button(this, null, android.R.attr.buttonStyleSmall).apply {
-                text = label
-                isAllCaps = false
-                minWidth = 0
-                minimumWidth = 0
-                setPadding(24, 4, 24, 4)
-                setTextColor(if (active) Color.parseColor("#7FDBFF") else Color.parseColor("#9E9E9E"))
-                setOnClickListener { bridge?.switchSession(info.id) }
-                setOnLongClickListener {
-                    bridge?.closeSession(info.id)
-                    true
+            tabStrip.addView(
+                SessionTabView(this).apply {
+                    sessionId = info.id
+                    isActiveTab = info.id == state.active
+                    isBusy = info.busy
+                    onTap = { bridge?.switchSession(info.id) }
+                    onHoldComplete = { bridge?.closeSession(info.id) }
                 }
-            }
-            tabStrip.addView(tab)
+            )
         }
-        findViewById<Button>(R.id.new_session_button).isEnabled =
-            state.sessions.size < state.max
+        val room = state.sessions.size < state.max
+        newSessionButton.isEnabled = room
+        newSessionButton.alpha = if (room) 1f else 0.35f
     }
 
     private fun showKeyboard() {
@@ -267,23 +231,22 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient, WebSock
 
     // -------------------------------------------------- WebSocketPtyBridge.Listener
     override fun onState(state: WebSocketPtyBridge.State, detail: String?) {
-        statusView.visibility = View.VISIBLE
-        statusView.text = buildString {
-            append(state.name.lowercase())
-            detail?.let { append(" · ").append(it) }
-        }
-        statusView.setTextColor(
-            when (state) {
-                WebSocketPtyBridge.State.CONNECTED -> Color.parseColor("#69F0AE")
-                WebSocketPtyBridge.State.UNAUTHORIZED,
-                WebSocketPtyBridge.State.FAILED -> Color.parseColor("#FF8A80")
-                else -> Color.parseColor("#FFD54F")
+        statusPill.setState(state, detail)
+
+        when (state) {
+            WebSocketPtyBridge.State.CONNECTED -> {
+                applyThemeOnce()
+                showBootOverlay(false)
             }
-        )
-        if (state == WebSocketPtyBridge.State.UNAUTHORIZED) {
-            session.feedLine("[zmux] 401 Unauthorized — the token did not match .zmux_auth_token.")
-            bridge = null
-            connectButton.text = getString(R.string.connect)
+
+            WebSocketPtyBridge.State.UNAUTHORIZED -> {
+                bridge = null
+                linkButton.text = getString(R.string.connect)
+                showBootOverlay(true)
+                bootBrand.tagline = "401 · token rejected"
+            }
+
+            else -> Unit
         }
     }
 
