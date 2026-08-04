@@ -58,7 +58,10 @@ public class TerminalSessionHelper {
         try {
             java.io.File rc = new java.io.File(dir, ".zmuxrc");
             java.io.FileWriter fw = new java.io.FileWriter(rc);
-            fw.write("export PS1='\\033[32mzmux\\033[0m~\\033[34m:\\033[0m$ '\n");
+            // Shell bawaan Android (mksh) butuh karakter escape beneran, bukan string "\033".
+            // Biar gampang dan pasti jalan, kita pake prompt bersih atau inject char escape.
+            char esc = (char) 27;
+            fw.write("export PS1='" + esc + "[32mzmux" + esc + "[0m~" + esc + "[34m:" + esc + "[0m$ '\n");
             fw.write("alias ls='ls --color=auto'\n");
             fw.close();
         } catch (Exception e) {

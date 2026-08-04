@@ -90,6 +90,10 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient, WebSock
         newSessionButton.setOnClickListener { bridge?.newSession() }
 
         buildVirtualKeys()
+
+        // Auto-start in local shell mode by default so we bypass the login screen
+        hostInput.setText("local")
+        toggleConnection()
     }
 
     /** Repaint the emulator palette once it exists. */
