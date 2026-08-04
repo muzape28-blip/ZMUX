@@ -1,0 +1,15 @@
+<resources>
+    <!-- ZMUX Ember palette. See ZmuxTheme.kt for the reasoning behind each role. -->
+    <color name="zmux_bg">#FF000000</color>
+    <color name="zmux_surface">#FF12101A</color>
+    <color name="zmux_surface_sunk">#FF0A0910</color>
+    <color name="zmux_outline">#FF241F2E</color>
+
+    <color name="zmux_ember">#FFFF8A3D</color>
+    <color name="zmux_teal">#FF5EE9D5</color>
+    <color name="zmux_rose">#FFFF5D73</color>
+    <color name="zmux_amber">#FFFFC857</color>
+
+    <color name="zmux_text">#FFE8E3DD</color>
+    <color name="zmux_text_dim">#FF6B6478</color>
+</resources>

@@ -1,0 +1,8 @@
+<resources>
+    <style name="Theme.Zmux" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="android:windowBackground">@color/zmux_bg</item>
+        <item name="android:statusBarColor">@color/zmux_surface</item>
+        <item name="android:navigationBarColor">@color/zmux_surface</item>
+        <item name="android:colorBackground">@color/zmux_bg</item>
+    </style>
+</resources>
