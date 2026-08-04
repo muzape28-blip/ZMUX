@@ -25,19 +25,20 @@ class ZmuxTerminalSession(
 
     init {
         // 1. Bypass the JNI fork by pre-seeding the emulator.
-        session.mEmulator = TerminalEmulator(session, 80, 24, transcriptRows, client)
+        val emulator = TerminalEmulator(session, 80, 24, transcriptRows, client)
         
         // 2. Apply theme immediately.
-        ZmuxTheme.applyTo(session.mEmulator)
+        ZmuxTheme.applyTo(emulator)
         
-        // 3. Trick TerminalSession.write() into NOT discarding input.
-        session.mShellPid = 1 
+        // 3. Trick TerminalSession.write() into NOT discarding input, and inject emulator
+        TerminalSessionHelper.injectEmulator(session, emulator)
 
         // 4. Intercept the user's keystrokes.
         readThread = Thread {
             val buffer = ByteArray(4096)
+            val queue = TerminalSessionHelper.getQueue(session)
             while (running) {
-                val bytes = runCatching { session.mTerminalToProcessIOQueue.read(buffer, true) }.getOrDefault(-1)
+                val bytes = runCatching { queue.read(buffer, true) }.getOrDefault(-1)
                 if (bytes == -1) break
                 onInput?.invoke(buffer.copyOfRange(0, bytes))
             }
@@ -45,18 +46,19 @@ class ZmuxTerminalSession(
     }
 
     fun feed(bytes: ByteArray) {
-        session.mEmulator?.append(bytes, bytes.size)
+        val emulator = session.getEmulator() ?: return
+        emulator.append(bytes, bytes.size)
         client.onTextChanged(session)
     }
 
     fun feedLine(text: String) = feed(("\r\n$text\r\n").toByteArray(Charsets.UTF_8))
 
-    val emulator: TerminalEmulator? get() = session.mEmulator
-    val columns: Int get() = session.mEmulator?.mColumns ?: 80
-    val rows: Int get() = session.mEmulator?.mRows ?: 24
+    val emulator: TerminalEmulator? get() = session.getEmulator()
+    val columns: Int get() = TerminalSessionHelper.getColumns(session.getEmulator())
+    val rows: Int get() = TerminalSessionHelper.getRows(session.getEmulator())
 
     fun finishIfRunning() {
         running = false
-        session.mTerminalToProcessIOQueue.close()
+        TerminalSessionHelper.getQueue(session).close()
     }
 }
