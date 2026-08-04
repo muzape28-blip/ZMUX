@@ -40,18 +40,6 @@
                 android:layout_width="0dp"
                 android:layout_height="1dp"
                 android:layout_weight="1" />
-
-            <TextView
-                android:id="@+id/link_button"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:background="@drawable/bg_ghost_button"
-                android:fontFamily="monospace"
-                android:paddingHorizontal="14dp"
-                android:paddingVertical="7dp"
-                android:text="@string/connect"
-                android:textColor="@color/zmux_teal"
-                android:textSize="12sp" />
         </LinearLayout>
 
         <View
@@ -113,9 +101,10 @@
             android:paddingVertical="3dp" />
     </LinearLayout>
 
-    <!-- Boot / connect overlay. Dismissed on first successful attach. -->
+    <!-- Boot overlay completely hidden for local shell mode -->
     <LinearLayout
         android:id="@+id/boot_overlay"
+        android:visibility="gone"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:background="@color/zmux_bg"
