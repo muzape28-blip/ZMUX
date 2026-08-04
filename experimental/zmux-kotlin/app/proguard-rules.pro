@@ -1,0 +1,4 @@
+-keep class com.termux.terminal.** { *; }
+-keep class com.termux.view.** { *; }
+-dontwarn okhttp3.**
+-dontwarn okio.**

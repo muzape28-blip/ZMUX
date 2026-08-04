@@ -1,0 +1,5 @@
+<resources>
+    <color name="zmux_bg">#FF000000</color>
+    <color name="zmux_bar">#FF161616</color>
+    <color name="zmux_fg">#FFE0E0E0</color>
+</resources>
