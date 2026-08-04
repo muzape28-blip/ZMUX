@@ -123,8 +123,14 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
     private fun closeSession(index: Int) {
         if (index !in sessions.indices) return
         sessions[index].finishIfRunning()
-
-        linkButton.text = getString(R.string.disconnect)
+        sessions.removeAt(index)
+        
+        if (sessions.isEmpty()) {
+            createNewSession()
+        } else {
+            val newIndex = if (activeSessionIndex >= sessions.size) sessions.size - 1 else activeSessionIndex
+            switchToSession(newIndex)
+        }
     }
 
     // ------------------------------------------------------- virtual keys (T3)
@@ -164,7 +170,6 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
             }
 
             key.action != null -> onFire = {
-                if (key.action == "pty.toggle") bridge?.togglePty()
                 terminalView.requestFocus()
             }
 
@@ -188,7 +193,6 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
     private fun showKeyboard() {
     }
 
-    override fun onSessions(state: ZmuxProtocol.SessionsState) = renderTabs(state)
 
     override fun onDestroy() {
         for (s in sessions) {
