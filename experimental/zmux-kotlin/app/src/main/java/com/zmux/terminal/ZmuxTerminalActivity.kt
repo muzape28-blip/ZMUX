@@ -2,20 +2,15 @@ package com.zmux.terminal
 
 import android.content.Context
 import android.os.Bundle
-import android.view.View
-import android.view.ViewGroup
 import android.view.inputmethod.InputMethodManager
-import android.widget.EditText
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.TextView
-import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
 import com.termux.terminal.ZmuxTerminalSession
 import com.termux.view.TerminalView
-import com.zmux.terminal.widget.BootBrandView
 import com.zmux.terminal.widget.KeyCapView
 import com.zmux.terminal.widget.SessionTabView
 import com.zmux.terminal.widget.StatusPillView
@@ -27,27 +22,19 @@ import com.zmux.terminal.widget.StatusPillView
  * presentation is its own: true-black field, ember/teal duotone, hand-drawn tabs and keycaps,
  * and a boot overlay that doubles as the connect form instead of a separate top bar.
  */
-class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient, WebSocketPtyBridge.Listener {
+class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
 
     private lateinit var terminalView: TerminalView
     private lateinit var statusPill: StatusPillView
-    private lateinit var hostInput: EditText
-    private lateinit var portInput: EditText
-    private lateinit var tokenInput: EditText
-    private lateinit var linkButton: TextView
-    private lateinit var bootConnect: TextView
-    private lateinit var bootOverlay: View
-    private lateinit var bootBrand: BootBrandView
     private lateinit var tabStrip: LinearLayout
     private lateinit var newSessionButton: TextView
-
-    private lateinit var session: ZmuxTerminalSession
     private lateinit var viewClient: ZmuxViewClient
 
-    private var bridge: WebSocketPtyBridge? = null
+    private val sessions = mutableListOf<ZmuxTerminalSession>()
+    private var activeSessionIndex = 0
+    private var sessionCounter = 1
+
     private var ctrlKeyCap: KeyCapView? = null
-    private var themeApplied = false
-    private var isLocalSession = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -55,107 +42,86 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient, WebSock
 
         terminalView = findViewById(R.id.terminal_view)
         statusPill = findViewById(R.id.status_pill)
-        hostInput = findViewById(R.id.host_input)
-        portInput = findViewById(R.id.port_input)
-        tokenInput = findViewById(R.id.token_input)
-        linkButton = findViewById(R.id.link_button)
-        bootConnect = findViewById(R.id.boot_connect)
-        bootOverlay = findViewById(R.id.boot_overlay)
-        bootBrand = findViewById(R.id.boot_brand)
         tabStrip = findViewById(R.id.tab_strip)
         newSessionButton = findViewById(R.id.new_session_button)
 
-        restoreConnectionFields()
-
         viewClient = ZmuxViewClient(terminalView)
         terminalView.setTerminalViewClient(viewClient)
-        terminalView.setTextSize((12 * resources.displayMetrics.density).toInt())
+        // Set font size to 10sp as requested
+        terminalView.setTextSize((10 * resources.displayMetrics.density).toInt())
         terminalView.keepScreenOn = true
         terminalView.isFocusable = true
         terminalView.isFocusableInTouchMode = true
 
-        session = com.termux.terminal.ZmuxTerminalSession(this)
-        terminalView.attachSession(session.session)
-        
         terminalView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-            session.onResize?.invoke(session.columns, session.rows)
+            activeSession()?.let { it.onResize?.invoke(it.columns, it.rows) }
         }
-        
-        applyThemeOnce()
 
-        statusPill.setState(WebSocketPtyBridge.State.IDLE, null)
+        statusPill.setState(WebSocketPtyBridge.State.CONNECTED, "local shell")
 
-        linkButton.setOnClickListener { toggleConnection() }
-        bootConnect.setOnClickListener { toggleConnection() }
-        newSessionButton.setOnClickListener { bridge?.newSession() }
+        newSessionButton.setOnClickListener { createNewSession() }
 
         buildVirtualKeys()
-
-        // Auto-start in local shell mode by default so we bypass the login screen
-        hostInput.setText("local")
-        toggleConnection()
-    }
-
-    /** Repaint the emulator palette once it exists. */
-    private fun applyThemeOnce() {
-        if (themeApplied) return
-        themeApplied = ZmuxTheme.applyTo(session.emulator)
-    }
-
-    // ------------------------------------------------------------------ connect
-    private fun restoreConnectionFields() {
-        val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        hostInput.setText(prefs.getString(KEY_HOST, "127.0.0.1"))
-        portInput.setText(prefs.getInt(KEY_PORT, ZmuxProtocol.DEFAULT_WS_PORT).toString())
-        tokenInput.setText(
-            intent.getStringExtra(EXTRA_TOKEN)
-                ?: ZmuxBackendLocator.findToken(this, intent.getStringExtra(EXTRA_ZMUX_PACKAGE))
-                ?: prefs.getString(KEY_TOKEN, "")
-        )
-    }
-
-    private fun toggleConnection() {
-        if (bridge != null || isLocalSession) {
-            bridge?.disconnect()
-            bridge = null
-            isLocalSession = false
-            linkButton.text = getString(R.string.connect)
-            showBootOverlay(true)
-            return
-        }
-
-        val host = hostInput.text.toString().trim().ifEmpty { "127.0.0.1" }
         
-        if (host.lowercase() == "local") {
-            // Secret local mode for testing without a backend!
-            isLocalSession = true
-            session.finishIfRunning()
-            session = com.termux.terminal.ZmuxTerminalSession(this, isLocalMode = true)
-            terminalView.attachSession(session.session)
-            themeApplied = false
-            applyThemeOnce()
-            showBootOverlay(false)
-            linkButton.text = getString(R.string.disconnect)
-            statusPill.setState(WebSocketPtyBridge.State.CONNECTED, "local shell")
-            return
+        // Auto-start in local shell mode by default so we bypass the login screen
+        createNewSession()
+    }
+
+    private fun activeSession(): ZmuxTerminalSession? {
+        if (activeSessionIndex in sessions.indices) return sessions[activeSessionIndex]
+        return null
+    }
+
+    private fun createNewSession() {
+        val newSession = com.termux.terminal.ZmuxTerminalSession(this, isLocalMode = true)
+        
+        // Sapaan / Welcome Message (Jujur dan No Mock)
+        val esc = 27.toChar()
+        val welcome = """
+            
+            ${esc}[33m=====================================================${esc}[0m
+             ${esc}[32mWELCOME TO ZMUX, FEEL FREE TO EXEC COMMAND.....${esc}[0m
+             
+             (Note: The Alpine/Debian setup via linux-setup is 
+              coming soon in the next ZABAWHEELS integration phase)
+            ${esc}[33m=====================================================${esc}[0m
+            
+        """.trimIndent()
+        newSession.feedLine(welcome)
+        
+        sessions.add(newSession)
+        switchToSession(sessions.size - 1)
+    }
+
+    private fun switchToSession(index: Int) {
+        if (index !in sessions.indices) return
+        activeSessionIndex = index
+        val s = sessions[index]
+        terminalView.attachSession(s.session)
+        renderLocalTabs()
+    }
+
+    private fun renderLocalTabs() {
+        tabStrip.removeAllViews()
+        for (i in sessions.indices) {
+            tabStrip.addView(
+                SessionTabView(this).apply {
+                    sessionId = "tab${i + 1}"
+                    isActiveTab = (i == activeSessionIndex)
+                    isBusy = false
+                    onTap = { switchToSession(i) }
+                    onHoldComplete = { closeSession(i) }
+                }
+            )
         }
+        val room = sessions.size < 8
+        newSessionButton.isEnabled = room
+        newSessionButton.alpha = if (room) 1f else 0.35f
+    }
 
-        val port = portInput.text.toString().trim().toIntOrNull() ?: ZmuxProtocol.DEFAULT_WS_PORT
-        val token = tokenInput.text.toString().trim()
-
-        if (token.isEmpty()) {
-            Toast.makeText(this, "Auth token required — ws_server replies 401", Toast.LENGTH_LONG).show()
-            return
-        }
-
-        getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putString(KEY_HOST, host).putInt(KEY_PORT, port).putString(KEY_TOKEN, token).apply()
-
-        bridge = WebSocketPtyBridge(
-            session,
-            WebSocketPtyBridge.Config(host = host, port = port, token = token),
-            this,
-        ).also { it.connect() }
+    private fun closeSession(index: Int) {
+        if (index !in sessions.indices) return
+        sessions[index].finishIfRunning()
 
         linkButton.text = getString(R.string.disconnect)
     }
@@ -227,62 +193,21 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient, WebSock
             ctrlKeyCap?.latched = false
         }
         val bytes = payload.toByteArray(Charsets.UTF_8)
-        session.session.write(bytes, 0, bytes.size)
-    }
-
-    // ------------------------------------------------------------- tab strip (T2)
-    private fun renderTabs(state: ZmuxProtocol.SessionsState) {
-        tabStrip.removeAllViews()
-        for (info in state.sessions) {
-            tabStrip.addView(
-                SessionTabView(this).apply {
-                    sessionId = info.id
-                    isActiveTab = info.id == state.active
-                    isBusy = info.busy
-                    onTap = { bridge?.switchSession(info.id) }
-                    onHoldComplete = { bridge?.closeSession(info.id) }
-                }
-            )
-        }
-        val room = state.sessions.size < state.max
-        newSessionButton.isEnabled = room
-        newSessionButton.alpha = if (room) 1f else 0.35f
+        activeSession()?.session?.write(bytes, 0, bytes.size)
     }
 
     private fun showKeyboard() {
-        terminalView.requestFocus()
-        (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
-            .showSoftInput(terminalView, InputMethodManager.SHOW_IMPLICIT)
-    }
-
-    override fun onDestroy() {
-        bridge?.disconnect()
-        session.finishIfRunning()
-        super.onDestroy()
-    }
-
-    // -------------------------------------------------- WebSocketPtyBridge.Listener
-    override fun onState(state: WebSocketPtyBridge.State, detail: String?) {
-        statusPill.setState(state, detail)
-
-        when (state) {
-            WebSocketPtyBridge.State.CONNECTED -> {
-                applyThemeOnce()
-                showBootOverlay(false)
-            }
-
-            WebSocketPtyBridge.State.UNAUTHORIZED -> {
-                bridge = null
-                linkButton.text = getString(R.string.connect)
-                showBootOverlay(true)
-                bootBrand.tagline = "401 · token rejected"
-            }
-
-            else -> Unit
-        }
     }
 
     override fun onSessions(state: ZmuxProtocol.SessionsState) = renderTabs(state)
+
+    override fun onDestroy() {
+        for (s in sessions) {
+            s.finishIfRunning()
+        }
+        sessions.clear()
+        super.onDestroy()
+    }
 
     // ------------------------------------------------------- TerminalSessionClient
     override fun onTextChanged(changedSession: TerminalSession) {
@@ -307,12 +232,5 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient, WebSock
     override fun logStackTrace(tag: String?, e: Exception?) = Unit
 
     companion object {
-        private const val PREFS = "zmux_kotlin"
-        private const val KEY_HOST = "ws_host"
-        private const val KEY_PORT = "ws_port"
-        private const val KEY_TOKEN = "ws_token"
-
-        const val EXTRA_TOKEN = "com.zmux.terminal.TOKEN"
-        const val EXTRA_ZMUX_PACKAGE = "com.zmux.terminal.ZMUX_PACKAGE"
     }
 }
