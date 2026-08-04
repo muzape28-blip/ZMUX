@@ -1,6 +1,9 @@
 package com.zmux.terminal
 
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.os.Bundle
 import android.view.ViewGroup
 import android.view.inputmethod.InputMethodManager
@@ -39,6 +42,32 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
 
     private var ctrlKeyCap: KeyCapView? = null
 
+    private val installReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val osName = intent?.getStringExtra("os") ?: return
+            val currentSession = activeSession() ?: return
+            
+            val esc = 27.toChar()
+            currentSession.feedLine("${esc}[34m[Chaquopy]${esc}[0m Bootstrapping Python Engine for $osName...")
+            
+            Thread {
+                try {
+                    val py = Python.getInstance()
+                    val sys = py.getModule("sys")
+                    val version = sys.get("version")?.toString()?.split(" ")?.get(0)
+                    
+                    currentSession.feedLine("${esc}[32m[Chaquopy]${esc}[0m Python $version engine activated!")
+                    
+                    val linuxenv = py.getModule("zmux.linuxenv")
+                    currentSession.feedLine("${esc}[32m[Chaquopy]${esc}[0m ZMUX Backend loaded: ${linuxenv}")
+                    currentSession.feedLine("${esc}[33m[Chaquopy]${esc}[0m Execution of PRoot is deferred to final integration phase.")
+                } catch (e: Exception) {
+                    currentSession.feedLine("${esc}[31m[Chaquopy Error]${esc}[0m ${e.message}")
+                }
+            }.start()
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
@@ -70,6 +99,13 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
         newSessionButton.setOnClickListener { createNewSession() }
 
         buildVirtualKeys()
+        
+        val filter = IntentFilter("com.zmux.terminal.INSTALL_OS")
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(installReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(installReceiver, filter)
+        }
         
         // Auto-start in local shell mode by default so we bypass the login screen
         createNewSession()
@@ -201,6 +237,7 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
 
 
     override fun onDestroy() {
+        unregisterReceiver(installReceiver)
         for (s in sessions) {
             s.finishIfRunning()
         }

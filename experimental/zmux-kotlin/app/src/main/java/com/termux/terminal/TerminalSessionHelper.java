@@ -55,6 +55,11 @@ public class TerminalSessionHelper {
             dir.mkdirs();
         }
 
+        java.io.File binDir = new java.io.File(dir, "bin");
+        if (!binDir.exists()) {
+            binDir.mkdirs();
+        }
+
         try {
             java.io.File rc = new java.io.File(dir, ".zmuxrc");
             java.io.FileWriter fw = new java.io.FileWriter(rc);
@@ -65,13 +70,39 @@ public class TerminalSessionHelper {
             fw.write("alias ls='ls --color=auto'\n");
             fw.write("alias clear='clear; printf \"\\033[3J\"'\n");
             fw.close();
+
+            java.io.File setup = new java.io.File(binDir, "linux-setup");
+            java.io.FileWriter fws = new java.io.FileWriter(setup);
+            fws.write("#!/system/bin/sh\n");
+            fws.write("echo '" + esc + "[33m=================================================" + esc + "[0m'\n");
+            fws.write("echo '" + esc + "[32m ZMUX Linux Setup" + esc + "[0m'\n");
+            fws.write("echo '" + esc + "[33m=================================================" + esc + "[0m'\n");
+            fws.write("echo '1) Alpine Linux (Lightweight, APK)'\n");
+            fws.write("echo '2) Debian (Robust, APT)'\n");
+            fws.write("echo '3) Cancel'\n");
+            fws.write("echo ''\n");
+            fws.write("printf 'Choose [1/2/3]: '\n");
+            fws.write("read choice\n");
+            fws.write("if [ \"$choice\" = \"1\" ]; then\n");
+            fws.write("    echo ''\n");
+            fws.write("    echo '" + esc + "[32m[*]" + esc + "[0m Triggering Alpine Linux installation...'\n");
+            fws.write("    am broadcast -a com.zmux.terminal.INSTALL_OS --es os \"alpine\" >/dev/null 2>&1\n");
+            fws.write("elif [ \"$choice\" = \"2\" ]; then\n");
+            fws.write("    echo ''\n");
+            fws.write("    echo '" + esc + "[32m[*]" + esc + "[0m Triggering Debian installation...'\n");
+            fws.write("    am broadcast -a com.zmux.terminal.INSTALL_OS --es os \"debian\" >/dev/null 2>&1\n");
+            fws.write("else\n");
+            fws.write("    echo 'Cancelled.'\n");
+            fws.write("fi\n");
+            fws.close();
+            setup.setExecutable(true);
         } catch (Exception e) {
             e.printStackTrace();
         }
 
         String[] env = new String[] {
             "HOME=" + filesDir,
-            "PATH=/system/bin:/system/xbin:/vendor/bin",
+            "PATH=" + binDir.getAbsolutePath() + ":/system/bin:/system/xbin:/vendor/bin",
             "ENV=" + filesDir + "/.zmuxrc"
         };
         return new TerminalSession("/system/bin/sh", filesDir, new String[0], env, 2000, client);
