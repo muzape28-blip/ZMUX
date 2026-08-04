@@ -63,7 +63,6 @@ dependencies {
 
     // --- Transport to the existing Python ZMUX backend ---
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
-    implementation("org.json:json:20240303")
 
     // --- AndroidX (kept minimal for Android Go footprint) ---
     implementation("androidx.core:core-ktx:1.13.1")

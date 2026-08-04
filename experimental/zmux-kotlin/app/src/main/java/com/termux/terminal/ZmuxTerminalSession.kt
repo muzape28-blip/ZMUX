@@ -1,8 +1,6 @@
-package com.zmux.terminal
+package com.termux.terminal
 
-import com.termux.terminal.TerminalEmulator
-import com.termux.terminal.TerminalSession
-import com.termux.terminal.TerminalSessionClient
+import com.zmux.terminal.ZmuxTheme
 
 /**
  * A [TerminalSession] that is NOT backed by a locally forked process.
@@ -39,7 +37,7 @@ class ZmuxTerminalSession(
     override fun initializeEmulator(columns: Int, rows: Int) {
         // Deliberately does not call TerminalSession#initializeEmulator(), which would fork a
         // local shell through the Termux JNI PTY. We only need the emulator/screen buffer.
-        mEmulator = TerminalEmulator(this, columns, rows, transcriptRows)
+        mEmulator = TerminalEmulator(this, columns, rows, transcriptRows, mClient)
         // Paint the ZMUX Ember palette the moment the buffer exists, so the very first
         // byte of output already renders in-theme.
         ZmuxTheme.applyTo(mEmulator)

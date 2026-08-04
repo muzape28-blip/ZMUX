@@ -13,6 +13,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
+import com.termux.terminal.ZmuxTerminalSession
 import com.zmux.terminal.widget.BootBrandView
 import com.zmux.terminal.widget.KeyCapView
 import com.zmux.terminal.widget.SessionTabView
@@ -264,7 +265,7 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient, WebSock
     override fun onBell(session: TerminalSession) = Unit
     override fun onColorsChanged(session: TerminalSession) = Unit
     override fun onTerminalCursorStateChange(state: Boolean) = Unit
-    override fun getTerminalCursorStyle(): Int = 0
+    override fun getTerminalCursorStyle(): Int? = 0
 
     override fun logError(tag: String?, message: String?) = Unit
     override fun logWarn(tag: String?, message: String?) = Unit

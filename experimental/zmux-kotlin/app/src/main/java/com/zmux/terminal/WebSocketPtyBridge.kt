@@ -2,6 +2,7 @@ package com.zmux.terminal
 
 import android.os.Handler
 import android.os.Looper
+import com.termux.terminal.ZmuxTerminalSession
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
