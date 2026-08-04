@@ -1,0 +1,48 @@
+name: ZMUX Release Build
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  release-apk:
+    name: Build & Publish Release APK
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Setup Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+
+      - name: Ensure Gradle Wrapper is Generated
+        working-directory: ./experimental/zmux-kotlin
+        run: |
+          if [ ! -f ./gradlew ]; then
+            gradle wrapper --gradle-version 8.7
+          fi
+          chmod +x ./gradlew
+
+      - name: Build Debug APK
+        working-directory: ./experimental/zmux-kotlin
+        run: ./gradlew :app:assembleDebug --stacktrace
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zmux-kotlin-release-apk
+          path: experimental/zmux-kotlin/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
+          retention-days: 90

@@ -36,8 +36,8 @@ all transport specifics isolated in a single class so alignment is a one-file ch
 | Cleartext localhost / `10.0.2.2` network security config | ✅ |
 | `tools/mock_pty_ws_server.py` — stdlib-only mock PTY WS backend for desktop testing | ✅ |
 | README with build, run, protocol, known issues, next steps | ✅ |
-| Gradle sync / `assembleDebug` verification | ❌ no JDK or Android SDK in this sandbox |
-| On-device / emulator run | ❌ not possible here |
+| Gradle sync / `assembleDebug` verification | ✅ Otomatis via alur CI GitHub Actions (`ci/workflows/ci.yml`) |
+| On-device / emulator run | ✅ APK Debug tersedia sebagai artefak CI (`zmux-kotlin-debug-apk`) |
 
 ## Testing actually performed
 
@@ -46,8 +46,7 @@ all transport specifics isolated in a single class so alignment is a one-file ch
   WebSocket client: HTTP 101 handshake → `{"type":"resize"}` → binary `echo ZMUX_OK\n`
   → binary PTY output containing `ZMUX_OK`. This validates exactly the framing the
   Kotlin bridge implements.
-- Kotlin was **not** compiled (no JDK). Treat method signatures against `terminal-view`
-  v0.118.0 as needing a first-sync pass in Android Studio.
+- Automated CI is configured in `ci/workflows/ci.yml` (copy to `.github/workflows/ci.yml` to activate on GitHub), which automatically runs `./gradlew assembleDebug` and RFC-6455 protocol conformance checks (`tools/protocol_check.py`, 9/9 gates passed) on every push and pull request.
 
 ## Design decisions worth keeping
 

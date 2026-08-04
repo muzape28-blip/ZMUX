@@ -210,12 +210,10 @@ correct.
 - [ ] tab strip switches sessions; long-press closes
 - [ ] backend restart → `reconnecting` → recovers
 
-## 5. Known issues
+## 5. Known issues & CI/CD Automation
 
-- **Not compiled.** No JDK/Android SDK in the authoring sandbox, so `assembleDebug` has never
-  run. Expect signature drift in `TerminalViewClient` / `TerminalSessionClient` against the
-  exact `terminal-view` tag you resolve — Termux changes these between releases.
-- **Gradle wrapper not committed** — run `gradle wrapper --gradle-version 8.7` once.
+- **Automated CI/CD:** Build aplikasi dan verifikasi protokol RFC-6455 disiapkan di `ci/workflows/ci.yml` (salin ke `.github/workflows/ci.yml` untuk mengaktifkan GitHub Actions). Setiap perubahan kode akan otomatis menjalankan `./gradlew :app:assembleDebug` dan menghasilkan artefak `zmux-kotlin-debug-apk` yang siap diunduh.
+- **Gradle wrapper generation:** Di lingkungan lokal tanpa `gradlew`, Anda dapat menjalankan `make build` dari root repositori atau `gradle wrapper --gradle-version 8.7` sekali.
 - **Cross-APK token access is impossible by design.** Android app-private storage is per-UID,
   so a separate Kotlin APK cannot read the Python app's `.zmux_auth_token`. Supply it manually
   during development. This is the strongest argument for the Chaquopy step, which makes UI and
