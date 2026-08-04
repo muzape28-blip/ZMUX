@@ -2,11 +2,11 @@
 gradle "$@" > error.log 2>&1
 exit_code=$?
 if [ $exit_code -ne 0 ]; then
-    git config --global user.email "ci@example.com"
-    git config --global user.name "CI"
-    git add error.log
-    git commit -m "Upload error log"
-    git push origin HEAD:arena/019fce3d-zmux
+    content=$(tail -n 300 error.log)
+    content="${content//'%'/'%25'}"
+    content="${content//$'\n'/'%0A'}"
+    content="${content//$'\r'/'%0D'}"
+    echo "::error::${content}"
     exit 1
 fi
 exit 0
