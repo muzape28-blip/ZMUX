@@ -2,6 +2,7 @@ package com.zmux.terminal
 
 import android.content.Context
 import android.os.Bundle
+import android.view.ViewGroup
 import android.view.inputmethod.InputMethodManager
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
@@ -124,18 +125,6 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
         sessions[index].finishIfRunning()
 
         linkButton.text = getString(R.string.disconnect)
-    }
-
-    private fun showBootOverlay(visible: Boolean) {
-        if (visible) {
-            bootOverlay.alpha = 1f
-            bootOverlay.visibility = View.VISIBLE
-        } else if (bootOverlay.visibility == View.VISIBLE) {
-            bootOverlay.animate().alpha(0f).setDuration(220L).withEndAction {
-                bootOverlay.visibility = View.GONE
-                showKeyboard()
-            }.start()
-        }
     }
 
     // ------------------------------------------------------- virtual keys (T3)
