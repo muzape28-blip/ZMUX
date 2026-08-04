@@ -130,14 +130,6 @@ def main() -> int:
     ap.add_argument("--token", default="dev")
     args = ap.parse_args()
 
-    import time, socket
-    for _ in range(20):
-        try:
-            with socket.create_connection((args.host, args.port), timeout=1): pass
-            break
-        except OSError:
-            time.sleep(0.5)
-
     results = []
 
     def gate(name, ok, detail=""):
