@@ -1,11 +1,12 @@
 #!/bin/bash
-gradle "$@" > build_output.log 2>&1
+gradle "$@" > error.log 2>&1
 exit_code=$?
 if [ $exit_code -ne 0 ]; then
-    echo "### ❌ Compile Error" >> $GITHUB_STEP_SUMMARY
-    echo '```text' >> $GITHUB_STEP_SUMMARY
-    tail -n 100 build_output.log >> $GITHUB_STEP_SUMMARY
-    echo '```' >> $GITHUB_STEP_SUMMARY
+    git config --global user.email "ci@example.com"
+    git config --global user.name "CI"
+    git add error.log
+    git commit -m "Upload error log"
+    git push origin HEAD:arena/019fce3d-zmux
     exit 1
 fi
 exit 0
