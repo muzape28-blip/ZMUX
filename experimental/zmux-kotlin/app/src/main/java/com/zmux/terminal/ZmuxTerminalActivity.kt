@@ -188,7 +188,6 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
     }
 
     override fun onDestroy() {
-        unregisterReceiver(installReceiver)
         for (s in sessions) {
             s.finishIfRunning()
         }
