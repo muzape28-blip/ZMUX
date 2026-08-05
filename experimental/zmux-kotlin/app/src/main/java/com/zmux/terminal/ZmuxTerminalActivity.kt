@@ -282,8 +282,18 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
                     
                     val linuxenv = py.getModule("zmux.linuxenv")
                     
+                    // Define progress callback
+                    val progressCallback = object : com.chaquo.python.PyObject() {
+                        override fun call(vararg args: Any?): com.chaquo.python.PyObject? {
+                            if (args.isNotEmpty()) {
+                                zmuxSession.feed(args[0].toString().toByteArray(Charsets.UTF_8))
+                            }
+                            return null
+                        }
+                    }
+
                     // Call install using Chaquopy's direct attribute invocation
-                    linuxenv.callAttr("install")
+                    linuxenv.callAttr("install", progressCallback, osName)
                     linuxenv.callAttr("install_guest_wrappers")
                     
                     zmuxSession.feedLine("${esc}[32m[Chaquopy]${esc}[0m Install completed successfully!")

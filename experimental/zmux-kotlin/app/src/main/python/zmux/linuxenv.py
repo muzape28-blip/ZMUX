@@ -140,8 +140,9 @@ def rootfs_dir() -> Path:
 
 def is_installed() -> bool:
     return (rootfs_dir() / "bin" / "busybox").is_file() and (
-        rootfs_dir() / "etc" / "alpine-release"
-    ).is_file()
+        (rootfs_dir() / "etc" / "alpine-release").is_file() or
+        (rootfs_dir() / "etc" / "debian_version").is_file()
+    )
 
 
 def installed_version() -> str:
