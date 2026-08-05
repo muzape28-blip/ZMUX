@@ -130,11 +130,17 @@ _NATIVE_LIBRARY_DIR_OVERRIDE: str | None = os.environ.get("ZMUX_NATIVE_LIBRARY_D
 
 
 def set_native_library_dir(path: str | None) -> bool:
-    """Set the trusted native library directory supplied by the Android host."""
+    """Set the trusted native library directory supplied by the Android host.
+
+    Do not require an eager ``stat`` here: a Chaquopy worker can receive this
+    value before Android exposes the directory to Python's filesystem layer.
+    ``proot_binary`` performs the real file check afterwards and reports the
+    exact expected path if packaging is broken.
+    """
     global _NATIVE_LIBRARY_DIR_OVERRIDE
     try:
         candidate = Path(str(path or ""))
-        if candidate.is_dir():
+        if candidate.is_absolute():
             _NATIVE_LIBRARY_DIR_OVERRIDE = str(candidate)
             return True
     except (OSError, ValueError):
@@ -146,7 +152,9 @@ def set_native_library_dir(path: str | None) -> bool:
 # Architecture
 # ---------------------------------------------------------------------------
 def _is_android() -> bool:
-    return any(k in os.environ for k in ("ANDROID_PRIVATE", "ANDROID_ARGUMENT", "ANDROID_APP_PATH"))
+    return bool(_NATIVE_LIBRARY_DIR_OVERRIDE) or any(
+        k in os.environ for k in ("ANDROID_PRIVATE", "ANDROID_ARGUMENT", "ANDROID_APP_PATH")
+    )
 
 
 def alpine_arch() -> str:
@@ -287,12 +295,14 @@ def native_library_dir() -> str | None:
     3. Scanning /proc/self/maps for an extracted libpython mapping (works
        even when the Java bridge is entirely unavailable).
     """
+    # Chaquopy is not python-for-android and may not define any of the
+    # ANDROID_* environment variables used by _is_android(). Kotlin passes
+    # this authoritative value explicitly, so it must win before that legacy
+    # runtime heuristic.
+    if _NATIVE_LIBRARY_DIR_OVERRIDE:
+        return _NATIVE_LIBRARY_DIR_OVERRIDE
     if not _is_android():
         return None
-    if _NATIVE_LIBRARY_DIR_OVERRIDE:
-        candidate = Path(_NATIVE_LIBRARY_DIR_OVERRIDE)
-        if candidate.is_dir():
-            return str(candidate)
     try:
         from zmux import javabridge
         activity = javabridge.mActivity()

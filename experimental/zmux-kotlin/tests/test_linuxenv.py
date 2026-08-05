@@ -47,6 +47,7 @@ class LinuxEnvInstallTests(unittest.TestCase):
         self.old_root = linuxenv._ROOTFS_DIR
         self.old_staging = linuxenv._STAGING_DIR
         self.old_cache = linuxenv.CACHE_DIR
+        self.old_native_library_dir = linuxenv._NATIVE_LIBRARY_DIR_OVERRIDE
         linuxenv._ROOTFS_DIR = self.root / "installed-rootfs"
         linuxenv._STAGING_DIR = self.root / "staging-rootfs"
         linuxenv.CACHE_DIR = self.root / "cache"
@@ -55,6 +56,7 @@ class LinuxEnvInstallTests(unittest.TestCase):
         linuxenv._ROOTFS_DIR = self.old_root
         linuxenv._STAGING_DIR = self.old_staging
         linuxenv.CACHE_DIR = self.old_cache
+        linuxenv._NATIVE_LIBRARY_DIR_OVERRIDE = self.old_native_library_dir
         self.temp.cleanup()
 
     def _tar(self, name: str, entries: dict[str, bytes]) -> Path:
@@ -74,6 +76,17 @@ class LinuxEnvInstallTests(unittest.TestCase):
         callback = InvokeOnlyCallback()
         linuxenv._emit_progress(callback, "Downloading rootfs\n")
         self.assertEqual(callback.messages, ["Downloading rootfs\r\n"])
+
+    def test_kotlin_native_library_override_finds_packaged_proot(self) -> None:
+        native_dir = self.root / "native-libs"
+        native_dir.mkdir()
+        proot = native_dir / "libproot.so"
+        proot.write_bytes(b"not-an-elf-test-placeholder")
+        proot.chmod(0o755)
+
+        self.assertTrue(linuxenv.set_native_library_dir(str(native_dir)))
+        self.assertEqual(linuxenv.native_library_dir(), str(native_dir))
+        self.assertEqual(linuxenv.proot_binary(), str(proot))
 
     def test_debian_spec_uses_existing_verified_termux_asset_and_native_arch(self) -> None:
         spec = linuxenv._rootfs_spec("debian")

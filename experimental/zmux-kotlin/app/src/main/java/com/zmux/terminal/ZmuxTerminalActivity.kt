@@ -311,7 +311,8 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
                 // This is the authoritative location for libproot.so. The
                 // Python engine is Chaquopy (not Kivy/python-for-android), so
                 // its legacy activity discovery cannot infer this directory.
-                linuxenv.callAttr("set_native_library_dir", applicationInfo.nativeLibraryDir)
+                val nativeLibDir = applicationInfo.nativeLibraryDir
+                linuxenv.callAttr("set_native_library_dir", nativeLibDir)
                 linuxenv.callAttr("install", progressCallback, osName)
                 linuxenv.callAttr("install_guest_wrappers")
 
@@ -329,10 +330,12 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
 
                 val proot = linuxenv.callAttr("proot_binary")?.toString()
                 if (proot.isNullOrBlank() || proot == "None") {
+                    val expected = java.io.File(nativeLibDir, "libproot.so")
                     appendTerminalLine(
                         zmuxSession,
-                        "${esc}[33m[Chaquopy]${esc}[0m Rootfs is ready, but this APK has no packaged PRoot binary yet. " +
-                            "Install the APK build containing libproot.so to launch the Linux shell."
+                        "${esc}[31m[Chaquopy Error]${esc}[0m PRoot is unavailable at $expected " +
+                            "(exists=${expected.isFile}, executable=${expected.canExecute()}). " +
+                            "This APK is incomplete; the build now rejects APKs missing PRoot."
                     )
                 } else {
                     appendTerminalLine(zmuxSession, "${esc}[32m[Chaquopy]${esc}[0m PRoot verified at $proot — launching $installedOs shell…")

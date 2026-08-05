@@ -46,23 +46,89 @@ android {
     }
 
     packaging {
+        // PRoot is an executable ELF which Android must materialize in
+        // ApplicationInfo.nativeLibraryDir. Compressed-in-APK native libs are
+        // loadable but not reliably exec-able on modern Android.
+        jniLibs {
+            useLegacyPackaging = true
+        }
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
+    }
+
+    sourceSets {
+        getByName("main") {
+            // Explicit rather than relying on AGP's default: the generated
+            // PRoot artifacts must be picked up before packageDebug runs.
+            jniLibs.srcDir("src/main/jniLibs")
+        }
+    }
+}
+
+val prootAbis = listOf("armeabi-v7a", "arm64-v8a")
+val prootLibraries = listOf("libproot.so", "libproot-loader.so", "libtalloc.so")
+val prootJniDir = layout.projectDirectory.dir("src/main/jniLibs")
+
+fun requireProotArtifacts() {
+    val missing = prootAbis.flatMap { abi ->
+        prootLibraries.mapNotNull { library ->
+            val artifact = prootJniDir.file("$abi/$library").asFile
+            if (artifact.isFile && artifact.length() > 0) null else artifact.path
+        }
+    }
+    check(missing.isEmpty()) {
+        "PRoot native artifacts are required but missing: ${missing.joinToString()}. " +
+            "Install Android NDK 29 or set ANDROID_NDK_HOME; do not ship a shell-only APK."
     }
 }
 
 tasks.register<Exec>("buildProot") {
     val ndkHome = System.getenv("ANDROID_NDK_LATEST_HOME") ?: System.getenv("ANDROID_NDK_HOME")
-    if (ndkHome == null) {
-        println("Skipping PRoot build: ANDROID_NDK_LATEST_HOME / ANDROID_NDK_HOME not set (safe for local debug without C++)")
-        commandLine("echo", "Skipping PRoot")
-    } else {
-        println("Building PRoot using NDK at: \$ndkHome")
-        commandLine("python3", "../scripts/build_proot_android.py", "--ndk", ndkHome, "--out", "src/main/jniLibs", "--abis", "armeabi-v7a,arm64-v8a")
+    if (ndkHome.isNullOrBlank()) {
+        throw GradleException(
+            "Android NDK is required to build ZMUX PRoot. Set ANDROID_NDK_LATEST_HOME or " +
+                "ANDROID_NDK_HOME; producing an APK without libproot.so is forbidden."
+        )
     }
+    println("Building PRoot using NDK at: $ndkHome")
+    commandLine(
+        "python3", "../scripts/build_proot_android.py", "--ndk", ndkHome,
+        "--out", "src/main/jniLibs", "--abis", "armeabi-v7a,arm64-v8a",
+    )
+    doLast { requireProotArtifacts() }
+}
+
+tasks.register("verifyProotJni") {
+    dependsOn("buildProot")
+    doLast { requireProotArtifacts() }
 }
 
 tasks.named("preBuild") {
-    dependsOn("buildProot")
+    dependsOn("verifyProotJni")
+}
+
+// Assert the actual *APK* contents as well as the build directory contents.
+// This catches source-set/packaging regressions before a phone sees the APK.
+tasks.register("verifyDebugProotPackage") {
+    dependsOn("packageDebug")
+    doLast {
+        val apk = layout.buildDirectory.file("outputs/apk/debug/app-debug.apk").get().asFile
+        check(apk.isFile) { "debug APK was not produced: $apk" }
+        java.util.zip.ZipFile(apk).use { zip ->
+            val missing = prootAbis.flatMap { abi ->
+                prootLibraries.mapNotNull { library ->
+                    val entry = "lib/$abi/$library"
+                    if (zip.getEntry(entry) == null) entry else null
+                }
+            }
+            check(missing.isEmpty()) {
+                "APK is missing mandatory PRoot libraries: ${missing.joinToString()}"
+            }
+        }
+    }
+}
+
+tasks.named("assembleDebug") {
+    finalizedBy("verifyDebugProotPackage")
 }
 
 chaquopy {
