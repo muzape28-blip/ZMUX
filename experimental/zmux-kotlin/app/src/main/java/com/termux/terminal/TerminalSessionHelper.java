@@ -49,11 +49,11 @@ public class TerminalSessionHelper {
             fws.write("if [ \"$choice\" = \"1\" ]; then\n");
             fws.write("    echo ''\n");
             fws.write("    echo '" + esc + "[32m[*]" + esc + "[0m Triggering Alpine Linux installation...'\n");
-            fws.write("    am broadcast -a com.zmux.terminal.INSTALL_OS --es os \"alpine\" >/dev/null 2>&1\n");
+            fws.write("    am broadcast -p com.zmux.terminal -a com.zmux.terminal.INSTALL_OS --es os \"alpine\" >/dev/null 2>&1\n");
             fws.write("elif [ \"$choice\" = \"2\" ]; then\n");
             fws.write("    echo ''\n");
             fws.write("    echo '" + esc + "[32m[*]" + esc + "[0m Triggering Debian installation...'\n");
-            fws.write("    am broadcast -a com.zmux.terminal.INSTALL_OS --es os \"debian\" >/dev/null 2>&1\n");
+            fws.write("    am broadcast -p com.zmux.terminal -a com.zmux.terminal.INSTALL_OS --es os \"debian\" >/dev/null 2>&1\n");
             fws.write("else\n");
             fws.write("    echo 'Cancelled.'\n");
             fws.write("fi\n");

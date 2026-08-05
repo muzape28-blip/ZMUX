@@ -123,7 +123,7 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
         @Suppress("UnspecifiedRegisterReceiverFlag")
         try {
             androidx.core.content.ContextCompat.registerReceiver(
-                this, installReceiver, filter, androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED
+                this, installReceiver, filter, androidx.core.content.ContextCompat.RECEIVER_EXPORTED
             )
         } catch (e: Exception) {
             registerReceiver(installReceiver, filter)
