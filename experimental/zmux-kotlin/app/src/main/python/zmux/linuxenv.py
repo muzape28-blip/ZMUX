@@ -562,6 +562,29 @@ def build_interactive_argv(host_cwd: Path) -> list:
     return argv
 
 
+#: Distro-aware PS1 block written into ~/.profile on first use. Single
+#: backslashes are intentional: the shell expands \w to the working directory
+#: at prompt-render time (~ inside $HOME). A literal $ (not \$) is deliberate:
+#: PRoot fakes uid 0, and # would wrongly imply Android-root privilege.
+_GUEST_PS1_BLOCK = (
+    "if [ -f /etc/alpine-release ]; then\n"
+    "  export PS1='zmux@alpine:\\w$ '\n"
+    "elif [ -f /etc/debian_version ]; then\n"
+    "  export PS1='zmux@debian:\\w$ '\n"
+    "else\n"
+    "  export PS1='zmux@linux:\\w$ '\n"
+    "fi"
+)
+
+#: Exact default PS1 lines older ZMUX builds emitted into ~/.profile. They
+#: were Alpine-only, so switching to Debian kept the wrong brand. Only these
+#: exact lines are migrated; a user-customised PS1 always stays authoritative.
+_LEGACY_PROFILE_PS1_LINES = (
+    "export PS1='zmux@alpine:\\w\\$ '",
+    "export PS1='zmux@alpine:\\w$ '",
+)
+
+
 def ensure_user_home_layout() -> None:
     """Create the persistent Alpine-facing workspace without touching files
     a user has already customised.
@@ -576,19 +599,22 @@ def ensure_user_home_layout() -> None:
     if not profile.exists():
         profile.write_text(
             "# Created by ZMUX. This file is yours to customise.\n"
-            "export PS1='zmux@alpine:\\w$ '\n"
+            "# Guest prompt: distro-aware, so Alpine <-> Debian switches stay branded.\n"
+            f"{_GUEST_PS1_BLOCK}\n"
             "mkdir -p \"$HOME/projects\"\n",
             encoding="utf-8",
         )
     else:
-        # Migrate only the exact profile line emitted by the previous ZMUX
-        # build. A literal `$` is intentional: PRoot presents uid 0 inside
-        # its guest, but ZMUX must not imply Android-root privilege with `#`.
+        # Migrate only the exact PS1 lines older builds wrote into an
+        # otherwise untouched default profile. A literal `$` stays intentional:
+        # PRoot presents uid 0 inside its guest, but ZMUX must not imply
+        # Android-root privilege with `#`.
         try:
             old = profile.read_text(encoding="utf-8")
-            legacy = "export PS1='zmux@alpine:\\w\\$ '"
-            if legacy in old:
-                profile.write_text(old.replace(legacy, "export PS1='zmux@alpine:\\w$ '"), encoding="utf-8")
+            for stale in _LEGACY_PROFILE_PS1_LINES:
+                if stale in old:
+                    profile.write_text(old.replace(stale, _GUEST_PS1_BLOCK), encoding="utf-8")
+                    break
         except OSError:
             pass
 
@@ -609,7 +635,7 @@ def interactive_env() -> dict:
     # root. The guest is a normal Alpine userland rooted at its own /.
     env["USER"] = "zmux"
     env["LOGNAME"] = "zmux"
-    env["PS1"] = "zmux@alpine:\\w$ "
+    env["PS1"] = f"zmux@{installed_os() or 'linux'}:\\w$ "
     return env
 
 
@@ -668,6 +694,9 @@ def install_guest_wrappers() -> int:
             written += 1
         except OSError:
             continue
+    # Keep the distro-branded login prompt current as well; wrapper install
+    # runs on every launch path, so pre-branding rootfses are repaired here.
+    ensure_guest_prompt()
     return written
 
 
@@ -941,6 +970,49 @@ def _safe_extract(tarball: Path, target: Path, strip_components: int = 0) -> Non
         payload.rmdir()
 
 
+def _install_guest_prompt(root: Path, os_name: str) -> None:
+    """Brand the login-shell prompt for the selected guest (zmux@alpine:~$ …).
+
+    The distro /etc/profile sets its own PS1 (Alpine: ``\\h:\\w\\$`` →
+    ``localhost:~#``), which is exactly what users saw after login. Appending
+    a marker-guarded export makes ZMUX's brand win for login shells without
+    editing the packaged lines. PRoot ``-0`` makes the shell run as uid 0, so
+    PS1's ``\\$`` would render ``#``; a literal ``$`` is written on purpose —
+    ``#`` would wrongly imply Android-root privilege inside a PRoot sandbox.
+    Both Alpine's ash and Debian's dash expand ``\\w`` at prompt-render time
+    (with ~ abbreviation), and both source /etc/profile for login shells.
+    Cosmetic and idempotent: never lets an OSError fail an install or launch.
+    """
+    profile = root / "etc" / "profile"
+    ps1 = f"zmux@{os_name}:\\w$ "
+    try:
+        if profile.is_file():
+            current = profile.read_text("utf-8", errors="replace")
+        else:
+            current = ""
+        if "ZMUX_PS1" in current:
+            return
+        with profile.open("a", encoding="utf-8", newline="\n") as out:
+            out.write(f"\n# ZMUX_PS1: distro-branded ZMUX guest prompt\nexport PS1='{ps1}'\n")
+    except OSError:
+        pass
+
+
+def ensure_guest_prompt() -> bool:
+    """Brand ``/etc/profile`` for the currently installed guest, if any.
+
+    Called on every Linux launch (from :func:`install_guest_wrappers`), so a
+    rootfs installed before prompt branding existed is repaired in place —
+    ``install()`` skips ``_bootstrap`` entirely on the "already installed"
+    path and would otherwise leave the distro default PS1 behind.
+    """
+    os_name = installed_os()
+    if not os_name:
+        return False
+    _install_guest_prompt(rootfs_dir(), os_name)
+    return True
+
+
 def _bootstrap(root: Path, os_name: str) -> None:
     """Write OS-specific first-run configuration and a durable OS marker."""
     os_name = _normalise_os_name(os_name)
@@ -982,6 +1054,7 @@ def _bootstrap(root: Path, os_name: str) -> None:
     resolv = etc / "resolv.conf"
     if not resolv.is_file():
         resolv.write_text("nameserver 8.8.8.8\nnameserver 1.1.1.1\n", encoding="utf-8")
+    _install_guest_prompt(root, os_name)
     (etc / ROOTFS_OS_MARKER).write_text(f"{os_name}\n", encoding="utf-8")
 
 

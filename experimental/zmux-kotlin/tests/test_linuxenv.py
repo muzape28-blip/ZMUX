@@ -286,5 +286,112 @@ class LegacyRootfsAdoptionTests(unittest.TestCase):
         self.assertFalse(self.new_rootfs.exists())
 
 
+class GuestPromptBrandingTests(unittest.TestCase):
+    """The distro-branded login prompt: zmux@alpine:~$ / zmux@debian:~$."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(prefix="zmux-prompt-test-")
+        self.root = Path(self.temp.name)
+        self.old_root = linuxenv._ROOTFS_DIR
+        self.old_home = linuxenv.HOME_DIR
+        linuxenv._ROOTFS_DIR = self.root / "installed-rootfs"
+        linuxenv.HOME_DIR = self.root / "home"
+
+    def tearDown(self) -> None:
+        linuxenv._ROOTFS_DIR = self.old_root
+        linuxenv.HOME_DIR = self.old_home
+        self.temp.cleanup()
+
+    def _guest(self, os_name: str, with_profile: bool = True) -> Path:
+        root = self.root / f"{os_name}-guest"
+        if root.exists():
+            import shutil as _sh
+            _sh.rmtree(root)
+        (root / "bin").mkdir(parents=True)
+        (root / "bin" / "sh").write_bytes(b"#!/bin/sh\n")
+        (root / "etc").mkdir()
+        if os_name == "alpine":
+            (root / "etc" / "alpine-release").write_text("3.22.5\n")
+        else:
+            (root / "etc" / "debian_version").write_text("12.4\n")
+        if with_profile:
+            # The real distro default users kept seeing after login.
+            (root / "etc" / "profile").write_text("export PS1='\\h:\\w\\$ '\n")
+        return root
+
+    def test_bootstrap_brands_alpine_prompt_and_stays_idempotent(self) -> None:
+        root = self._guest("alpine")
+        linuxenv._bootstrap(root, "alpine")
+        profile = (root / "etc" / "profile").read_text()
+        self.assertIn("export PS1='zmux@alpine:\\w$ '", profile)
+        self.assertIn("export PS1='\\h:\\w\\$ '", profile)  # distro default kept
+        linuxenv._bootstrap(root, "alpine")
+        self.assertEqual(profile, (root / "etc" / "profile").read_text())  # no dupes
+
+    def test_bootstrap_brands_debian_prompt(self) -> None:
+        root = self._guest("debian")
+        linuxenv._bootstrap(root, "debian")
+        profile = (root / "etc" / "profile").read_text()
+        self.assertIn("export PS1='zmux@debian:\\w$ '", profile)
+        self.assertNotIn("zmux@alpine", profile)
+
+    def test_branding_creates_missing_profile(self) -> None:
+        root = self._guest("alpine", with_profile=False)
+        (root / "etc" / "profile").unlink(missing_ok=True)
+        linuxenv._install_guest_prompt(root, "alpine")
+        self.assertIn("zmux@alpine:\\w$ ", (root / "etc" / "profile").read_text())
+
+    def test_ensure_guest_prompt_repairs_already_installed_rootfs(self) -> None:
+        # Simulates "already installed" installs: install() returns early and
+        # never reruns _bootstrap, so the launch path must brand on its own.
+        root = self._guest("debian")
+        import shutil as _sh
+        _sh.copytree(root, linuxenv._ROOTFS_DIR)
+        profile = linuxenv._ROOTFS_DIR / "etc" / "profile"
+        self.assertNotIn("ZMUX_PS1", profile.read_text())
+        self.assertTrue(linuxenv.ensure_guest_prompt())
+        self.assertIn("export PS1='zmux@debian:\\w$ '", profile.read_text())
+        before = profile.read_text()
+        linuxenv.ensure_guest_prompt()  # idempotent
+        self.assertEqual(before, profile.read_text())
+
+    def test_ensure_guest_prompt_noop_without_install(self) -> None:
+        self.assertFalse(linuxenv.ensure_guest_prompt())
+
+    def test_home_layout_writes_distro_aware_single_backslash_ps1(self) -> None:
+        linuxenv.ensure_user_home_layout()
+        content = (linuxenv.HOME_DIR / ".profile").read_text()
+        self.assertIn("zmux@alpine:\\w$ ", content)
+        self.assertIn("zmux@debian:\\w$ ", content)
+        self.assertNotIn("\\\\w", content)  # no literal double backslash
+
+    def test_home_layout_migrates_exact_legacy_ps1_lines(self) -> None:
+        profile = linuxenv.HOME_DIR / ".profile"
+        profile.parent.mkdir(parents=True, exist_ok=True)
+        for stale in linuxenv._LEGACY_PROFILE_PS1_LINES:
+            profile.write_text(f"# default from an older build\n{stale}\nmkdir -p \"$HOME/projects\"\n")
+            linuxenv.ensure_user_home_layout()
+            content = profile.read_text()
+            self.assertIn(linuxenv._GUEST_PS1_BLOCK, content)
+            # Anchored at a line start: the indented alpine line inside the
+            # replacement block is fine, only a surviving top-level default is not.
+            self.assertNotIn("\n" + stale, "\n" + content)
+
+    def test_home_layout_never_touches_custom_ps1(self) -> None:
+        profile = linuxenv.HOME_DIR / ".profile"
+        profile.parent.mkdir(parents=True, exist_ok=True)
+        custom = "# mine\nexport PS1='user> '\n"
+        profile.write_text(custom)
+        linuxenv.ensure_user_home_layout()
+        self.assertEqual(custom, profile.read_text())
+
+    def test_interactive_env_ps1_follows_installed_os(self) -> None:
+        root = self._guest("debian")
+        import shutil as _sh
+        _sh.copytree(root, linuxenv._ROOTFS_DIR)
+        env = linuxenv.interactive_env()
+        self.assertEqual(env["PS1"], "zmux@debian:\\w$ ")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

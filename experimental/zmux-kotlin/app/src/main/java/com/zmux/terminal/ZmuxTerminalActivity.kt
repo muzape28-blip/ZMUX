@@ -210,6 +210,7 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
                 rootfs.absolutePath,
                 homePath,
                 cachePath,
+                osName,
             )
             sessions[index] = linuxSession
             activeSessionIndex = index

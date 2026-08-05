@@ -101,7 +101,8 @@ public class TerminalSessionHelper {
             String nativeLibraryDir,
             String rootfsDir,
             String homeDir,
-            String cacheDir) {
+            String cacheDir,
+            String osName) {
         java.io.File rootfs = new java.io.File(rootfsDir);
         java.io.File home = new java.io.File(homeDir);
         // PROOT_TMP_DIR must match zmux.paths.CACHE_DIR (the Python side also
@@ -135,7 +136,9 @@ public class TerminalSessionHelper {
             "TERM=xterm-256color",
             "LANG=C.UTF-8",
             "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-            "PS1=zmux@linux:\\w$ ",
+            // Fallback PS1 for shells which skip /etc/profile; login shells get
+            // the same brand from the ZMUX_PS1 export linuxenv installs there.
+            "PS1=zmux@" + ((osName != null && !osName.isEmpty()) ? osName : "linux") + ":\\w$ ",
             "LD_LIBRARY_PATH=" + nativeLibraryDir,
             "PROOT_LOADER=" + loader,
             "PROOT_TMP_DIR=" + cache.getAbsolutePath(),
