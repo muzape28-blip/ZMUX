@@ -101,6 +101,7 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
         buildVirtualKeys()
         
         val filter = IntentFilter("com.zmux.terminal.INSTALL_OS")
+        @Suppress("UnspecifiedRegisterReceiverFlag")
         try {
             androidx.core.content.ContextCompat.registerReceiver(
                 this, installReceiver, filter, androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED
