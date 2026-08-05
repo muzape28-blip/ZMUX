@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
 # This repository intentionally delegates to the Gradle installation supplied by
-# Android Studio/CI. Keep a local transcript, but stream it too: redirecting all
-# output to a file hid the actionable Kotlin/Chaquopy error from GitHub Actions.
+# Android Studio/CI. Keep the full transcript locally, but print a compact,
+# useful failure summary: PRoot's compiler is very verbose and can otherwise
+# bury the actual Kotlin/Chaquopy diagnostic beyond GitHub's log limit.
 set -o pipefail
 
-gradle "$@" 2>&1 | tee error.log
-exit_code=${PIPESTATUS[0]}
+gradle "$@" > error.log 2>&1
+exit_code=$?
+if [ "$exit_code" -ne 0 ]; then
+    echo "::group::Gradle failure summary"
+    grep -E -i '(^e: |^error:|^failure:|what went wrong|execution failed|exception|could not|unresolved reference|type mismatch)' error.log | tail -n 120 || true
+    echo "--- final Gradle output ---"
+    tail -n 100 error.log
+    echo "::endgroup::"
+fi
 exit "$exit_code"
