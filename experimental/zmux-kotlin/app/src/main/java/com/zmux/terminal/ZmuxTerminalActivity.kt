@@ -1,22 +1,22 @@
 package com.zmux.terminal
 
-import android.content.Context
 import android.os.Bundle
-import android.view.View
 import android.view.ViewGroup
-import android.view.inputmethod.InputMethodManager
-import android.widget.EditText
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.TextView
-import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
-import com.zmux.terminal.widget.BootBrandView
+import com.termux.terminal.ZmuxTerminalSession
+import com.termux.terminal.TerminalSessionHelper
+import com.chaquo.python.Python
+import com.chaquo.python.android.AndroidPlatform
+import com.termux.view.TerminalView
 import com.zmux.terminal.widget.KeyCapView
 import com.zmux.terminal.widget.SessionTabView
 import com.zmux.terminal.widget.StatusPillView
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Native Kotlin terminal for ZMUX, styled as **ZMUX Ember** (see [ZmuxTheme]).
@@ -25,119 +25,178 @@ import com.zmux.terminal.widget.StatusPillView
  * presentation is its own: true-black field, ember/teal duotone, hand-drawn tabs and keycaps,
  * and a boot overlay that doubles as the connect form instead of a separate top bar.
  */
-class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient, WebSocketPtyBridge.Listener {
+class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
 
-    private lateinit var terminalView: ZmuxTerminalView
+    private lateinit var terminalView: TerminalView
     private lateinit var statusPill: StatusPillView
-    private lateinit var hostInput: EditText
-    private lateinit var portInput: EditText
-    private lateinit var tokenInput: EditText
-    private lateinit var linkButton: TextView
-    private lateinit var bootConnect: TextView
-    private lateinit var bootOverlay: View
-    private lateinit var bootBrand: BootBrandView
     private lateinit var tabStrip: LinearLayout
     private lateinit var newSessionButton: TextView
-
-    private lateinit var session: ZmuxTerminalSession
     private lateinit var viewClient: ZmuxViewClient
 
-    private var bridge: WebSocketPtyBridge? = null
+    private val sessions = mutableListOf<ZmuxTerminalSession>()
+    private var activeSessionIndex = 0
     private var ctrlKeyCap: KeyCapView? = null
-    private var themeApplied = false
+
+    /** One rootfs operation at a time, even if terminal title sequences repeat. */
+    private val installInProgress = AtomicBoolean(false)
+
+    /**
+     * Chaquopy runs the installer on a worker thread. TerminalEmulator and
+     * TerminalView are UI objects, so every byte returned by Python must cross
+     * back to the main thread before it is appended or painted.
+     */
+    private fun appendToTerminal(session: ZmuxTerminalSession, bytes: ByteArray) {
+        runOnUiThread {
+            if (!isFinishing && !isDestroyed && sessions.contains(session)) {
+                session.feed(bytes)
+            }
+        }
+    }
+
+    private fun appendTerminalLine(session: ZmuxTerminalSession, text: String) {
+        appendToTerminal(session, ("\r\n$text\r\n").toByteArray(Charsets.UTF_8))
+    }
+
+    /** Render the real Java/Python exception, not traceback.format_exc() outside its context. */
+    private fun formatInstallFailure(error: Throwable): String {
+        val details = mutableListOf<String>()
+        var current: Throwable? = error
+        while (current != null && details.size < 4) {
+            // Take an immutable reference before the loop advances. Kotlin
+            // cannot smart-cast a mutable variable inside ifBlank's lambda.
+            val item = current ?: break
+            val type = item.javaClass.simpleName.ifBlank { item.javaClass.name }
+            val message = item.message?.trim()?.takeIf { it.isNotEmpty() }
+            details += if (message == null) type else "$type: $message"
+            val next = item.cause
+            if (next === item) break
+            current = next
+        }
+        return details.distinct().joinToString("\nCaused by: ")
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        
+        if (!Python.isStarted()) {
+            Python.start(AndroidPlatform(this))
+        }
+
         setContentView(R.layout.activity_terminal)
 
         terminalView = findViewById(R.id.terminal_view)
         statusPill = findViewById(R.id.status_pill)
-        hostInput = findViewById(R.id.host_input)
-        portInput = findViewById(R.id.port_input)
-        tokenInput = findViewById(R.id.token_input)
-        linkButton = findViewById(R.id.link_button)
-        bootConnect = findViewById(R.id.boot_connect)
-        bootOverlay = findViewById(R.id.boot_overlay)
-        bootBrand = findViewById(R.id.boot_brand)
         tabStrip = findViewById(R.id.tab_strip)
         newSessionButton = findViewById(R.id.new_session_button)
 
-        restoreConnectionFields()
-
         viewClient = ZmuxViewClient(terminalView)
         terminalView.setTerminalViewClient(viewClient)
-        terminalView.applyZmuxDefaults()
+        // Set font size to 10sp as requested
+        terminalView.setTextSize((10 * resources.displayMetrics.density).toInt())
+        terminalView.keepScreenOn = true
+        terminalView.isFocusable = true
+        terminalView.isFocusableInTouchMode = true
 
-        session = ZmuxTerminalSession(this)
-        terminalView.attach(session)
-        applyThemeOnce()
+        terminalView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            activeSession()?.let { it.onResize?.invoke(it.columns, it.rows) }
+        }
 
-        statusPill.setState(WebSocketPtyBridge.State.IDLE, null)
+        statusPill.setState(StatusPillView.State.CONNECTED, "local shell")
 
-        linkButton.setOnClickListener { toggleConnection() }
-        bootConnect.setOnClickListener { toggleConnection() }
-        newSessionButton.setOnClickListener { bridge?.newSession() }
+        newSessionButton.setOnClickListener { createNewSession() }
 
         buildVirtualKeys()
+        
+        // Auto-start in local shell mode by default so we bypass the login screen
+        createNewSession()
     }
 
-    /** Repaint the emulator palette once it exists. */
-    private fun applyThemeOnce() {
-        if (themeApplied) return
-        themeApplied = ZmuxTheme.applyTo(session.emulator)
+    private fun activeSession(): ZmuxTerminalSession? {
+        if (activeSessionIndex in sessions.indices) return sessions[activeSessionIndex]
+        return null
     }
 
-    // ------------------------------------------------------------------ connect
-    private fun restoreConnectionFields() {
-        val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        hostInput.setText(prefs.getString(KEY_HOST, "127.0.0.1"))
-        portInput.setText(prefs.getInt(KEY_PORT, ZmuxProtocol.DEFAULT_WS_PORT).toString())
-        tokenInput.setText(
-            intent.getStringExtra(EXTRA_TOKEN)
-                ?: ZmuxBackendLocator.findToken(this, intent.getStringExtra(EXTRA_ZMUX_PACKAGE))
-                ?: prefs.getString(KEY_TOKEN, "")
-        )
+    private fun createNewSession() {
+        val newSession = ZmuxTerminalSession(this)
+        sessions.add(newSession)
+        switchToSession(sessions.size - 1)
     }
 
-    private fun toggleConnection() {
-        bridge?.let {
-            it.disconnect()
-            bridge = null
-            linkButton.text = getString(R.string.connect)
-            showBootOverlay(true)
-            return
+    private fun switchToSession(index: Int) {
+        if (index !in sessions.indices) return
+        activeSessionIndex = index
+        val s = sessions[index]
+        terminalView.attachSession(s.session)
+        renderLocalTabs()
+    }
+
+    private fun renderLocalTabs() {
+        tabStrip.removeAllViews()
+        for (i in sessions.indices) {
+            tabStrip.addView(
+                SessionTabView(this).apply {
+                    sessionId = "tab${i + 1}"
+                    isActiveTab = (i == activeSessionIndex)
+                    isBusy = false
+                    onTap = { switchToSession(i) }
+                    onHoldComplete = { closeSession(i) }
+                }
+            )
         }
-
-        val host = hostInput.text.toString().trim().ifEmpty { "127.0.0.1" }
-        val port = portInput.text.toString().trim().toIntOrNull() ?: ZmuxProtocol.DEFAULT_WS_PORT
-        val token = tokenInput.text.toString().trim()
-
-        if (token.isEmpty()) {
-            Toast.makeText(this, "Auth token required — ws_server replies 401", Toast.LENGTH_LONG).show()
-            return
-        }
-
-        getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putString(KEY_HOST, host).putInt(KEY_PORT, port).putString(KEY_TOKEN, token).apply()
-
-        bridge = WebSocketPtyBridge(
-            session,
-            WebSocketPtyBridge.Config(host = host, port = port, token = token),
-            this,
-        ).also { it.connect() }
-
-        linkButton.text = getString(R.string.disconnect)
+        val room = sessions.size < 8
+        newSessionButton.isEnabled = room
+        newSessionButton.alpha = if (room) 1f else 0.35f
     }
 
-    private fun showBootOverlay(visible: Boolean) {
-        if (visible) {
-            bootOverlay.alpha = 1f
-            bootOverlay.visibility = View.VISIBLE
-        } else if (bootOverlay.visibility == View.VISIBLE) {
-            bootOverlay.animate().alpha(0f).setDuration(220L).withEndAction {
-                bootOverlay.visibility = View.GONE
-                showKeyboard()
-            }.start()
+    private fun closeSession(index: Int) {
+        if (index !in sessions.indices) return
+        sessions[index].finishIfRunning()
+        sessions.removeAt(index)
+        
+        if (sessions.isEmpty()) {
+            createNewSession()
+        } else {
+            val newIndex = if (activeSessionIndex >= sessions.size) sessions.size - 1 else activeSessionIndex
+            switchToSession(newIndex)
+        }
+    }
+
+    /** Replace the bootstrap host shell with PRoot -> guest /bin/sh in the same tab. */
+    private fun launchLinuxSession(
+        bootstrapSession: ZmuxTerminalSession,
+        prootPath: String,
+        osName: String,
+    ) {
+        runOnUiThread {
+            if (isFinishing || isDestroyed) return@runOnUiThread
+            val index = sessions.indexOf(bootstrapSession)
+            if (index < 0) return@runOnUiThread
+
+            val rootfs = java.io.File(filesDir, "linux/rootfs")
+            if (!rootfs.isDirectory) {
+                appendTerminalLine(
+                    bootstrapSession,
+                    "\u001b[31m[Chaquopy Error]\u001b[0m Rootfs path disappeared before PRoot launch: $rootfs"
+                )
+                return@runOnUiThread
+            }
+
+            // Stop the Android mksh process which waited for .setup_done, then
+            // attach a fresh kernel PTY whose child is PRoot and guest /bin/sh.
+            bootstrapSession.finishIfRunning()
+            val linuxSession = ZmuxTerminalSession(
+                this,
+                prootPath,
+                applicationInfo.nativeLibraryDir,
+                rootfs.absolutePath,
+                java.io.File(filesDir, "home").absolutePath,
+            )
+            sessions[index] = linuxSession
+            activeSessionIndex = index
+            terminalView.attachSession(linuxSession.session)
+            statusPill.setState(StatusPillView.State.CONNECTED, "$osName via PRoot")
+            renderLocalTabs()
+            terminalView.requestFocus()
         }
     }
 
@@ -153,11 +212,11 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient, WebSock
                 HorizontalScrollView(this).apply {
                     isHorizontalScrollBarEnabled = false
                     addView(rowView)
-                },
-                LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                ),
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                    )
+                }
             )
         }
     }
@@ -178,7 +237,6 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient, WebSock
             }
 
             key.action != null -> onFire = {
-                if (key.action == "pty.toggle") bridge?.togglePty()
                 terminalView.requestFocus()
             }
 
@@ -196,75 +254,119 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient, WebSock
             ctrlKeyCap?.latched = false
         }
         val bytes = payload.toByteArray(Charsets.UTF_8)
-        session.write(bytes, 0, bytes.size)
-    }
-
-    // ------------------------------------------------------------- tab strip (T2)
-    private fun renderTabs(state: ZmuxProtocol.SessionsState) {
-        tabStrip.removeAllViews()
-        for (info in state.sessions) {
-            tabStrip.addView(
-                SessionTabView(this).apply {
-                    sessionId = info.id
-                    isActiveTab = info.id == state.active
-                    isBusy = info.busy
-                    onTap = { bridge?.switchSession(info.id) }
-                    onHoldComplete = { bridge?.closeSession(info.id) }
-                }
-            )
-        }
-        val room = state.sessions.size < state.max
-        newSessionButton.isEnabled = room
-        newSessionButton.alpha = if (room) 1f else 0.35f
-    }
-
-    private fun showKeyboard() {
-        terminalView.requestFocus()
-        (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
-            .showSoftInput(terminalView, InputMethodManager.SHOW_IMPLICIT)
+        activeSession()?.session?.write(bytes, 0, bytes.size)
     }
 
     override fun onDestroy() {
-        bridge?.disconnect()
+        for (s in sessions) {
+            s.finishIfRunning()
+        }
+        sessions.clear()
         super.onDestroy()
     }
 
-    // -------------------------------------------------- WebSocketPtyBridge.Listener
-    override fun onState(state: WebSocketPtyBridge.State, detail: String?) {
-        statusPill.setState(state, detail)
-
-        when (state) {
-            WebSocketPtyBridge.State.CONNECTED -> {
-                applyThemeOnce()
-                showBootOverlay(false)
-            }
-
-            WebSocketPtyBridge.State.UNAUTHORIZED -> {
-                bridge = null
-                linkButton.text = getString(R.string.connect)
-                showBootOverlay(true)
-                bootBrand.tagline = "401 · token rejected"
-            }
-
-            else -> Unit
+    // ------------------------------------------------------- TerminalSessionClient
+    override fun onTextChanged(changedSession: TerminalSession) {
+        if (::terminalView.isInitialized) {
+            terminalView.onScreenUpdated()
+            ZmuxTheme.applyTo(TerminalSessionHelper.getEmulator(changedSession))
         }
     }
 
-    override fun onSessions(state: ZmuxProtocol.SessionsState) = renderTabs(state)
+    override fun onTitleChanged(changedSession: TerminalSession) {
+        val title = changedSession.title ?: return
+        val osName = when (title) {
+            "INSTALL_ALPINE" -> "alpine"
+            "INSTALL_DEBIAN" -> "debian"
+            else -> return
+        }
+        val zmuxSession = sessions.find { it.session == changedSession } ?: return
 
-    // ------------------------------------------------------- TerminalSessionClient
-    override fun onTextChanged(changedSession: TerminalSession) {
-        if (::terminalView.isInitialized) terminalView.onScreenUpdated()
+        if (!installInProgress.compareAndSet(false, true)) {
+            appendTerminalLine(zmuxSession, "\u001b[33m[Chaquopy]\u001b[0m Linux setup is already running. Please wait.")
+            return
+        }
+
+        val esc = 27.toChar()
+        appendTerminalLine(zmuxSession, "${esc}[34m[Chaquopy]${esc}[0m Starting verified $osName rootfs setup…")
+
+        Thread {
+            try {
+                val py = Python.getInstance()
+                val version = py.getModule("sys").get("version")
+                    ?.toString()?.substringBefore(" ") ?: "unknown"
+                appendTerminalLine(zmuxSession, "${esc}[32m[Chaquopy]${esc}[0m Python $version engine activated!")
+                appendTerminalLine(zmuxSession, "${esc}[32m[Chaquopy]${esc}[0m Downloading and verifying rootfs…")
+
+                val progressCallback = object : TerminalSessionHelper.ProgressCallback {
+                    override fun invoke(message: String) {
+                        // Chaquopy 15 exposes this as a Java object. linuxenv._emit_progress
+                        // calls its explicit invoke method rather than treating it as a
+                        // Python callable, and this helper moves the UI work to main.
+                        appendToTerminal(zmuxSession, message.toByteArray(Charsets.UTF_8))
+                    }
+                }
+
+                val linuxenv = py.getModule("zmux.linuxenv")
+                // This is the authoritative location for libproot.so. The
+                // Python engine is Chaquopy (not Kivy/python-for-android), so
+                // its legacy activity discovery cannot infer this directory.
+                val nativeLibDir = applicationInfo.nativeLibraryDir
+                linuxenv.callAttr("set_native_library_dir", nativeLibDir)
+                linuxenv.callAttr("install", progressCallback, osName)
+                linuxenv.callAttr("install_guest_wrappers")
+
+                // PyObject.get("key") is Python attribute access, not dict
+                // item access. Ask the module directly so the success banner
+                // reports the real installed guest/version on every Chaquopy release.
+                val installedOs = linuxenv.callAttr("installed_os").toString().ifBlank { osName }
+                val versionText = linuxenv.callAttr("installed_version").toString()
+                    .takeIf { it.isNotBlank() }
+                val suffix = if (versionText == null) "" else " ($versionText)"
+                appendTerminalLine(
+                    zmuxSession,
+                    "${esc}[32m[Chaquopy]${esc}[0m $installedOs$suffix rootfs installed and verified successfully!"
+                )
+
+                val proot = linuxenv.callAttr("proot_binary")?.toString()
+                if (proot.isNullOrBlank() || proot == "None") {
+                    val expected = java.io.File(nativeLibDir, "libproot.so")
+                    appendTerminalLine(
+                        zmuxSession,
+                        "${esc}[31m[Chaquopy Error]${esc}[0m PRoot is unavailable at $expected " +
+                            "(exists=${expected.isFile}, executable=${expected.canExecute()}). " +
+                            "This APK is incomplete; the build now rejects APKs missing PRoot."
+                    )
+                } else {
+                    appendTerminalLine(zmuxSession, "${esc}[32m[Chaquopy]${esc}[0m PRoot verified at $proot — launching $installedOs shell…")
+                    launchLinuxSession(zmuxSession, proot, installedOs)
+                }
+            } catch (error: Throwable) {
+                // Do not call Python traceback.format_exc() here: this is a Kotlin catch
+                // block, so Python has no active exception and returns "NoneType: None".
+                appendTerminalLine(
+                    zmuxSession,
+                    "${esc}[31m[Chaquopy Error]${esc}[0m\r\n${formatInstallFailure(error)}"
+                )
+            } finally {
+                try {
+                    // The host shell waits for this marker. Always release it after a
+                    // success or a genuine diagnostic so a corrected retry is possible.
+                    java.io.File(this@ZmuxTerminalActivity.filesDir, ".setup_done").createNewFile()
+                } catch (_: Exception) {
+                    // A closing activity may have removed the app directory.
+                }
+                installInProgress.set(false)
+            }
+        }.start()
     }
-
-    override fun onTitleChanged(changedSession: TerminalSession) = Unit
     override fun onSessionFinished(finishedSession: TerminalSession) = Unit
     override fun onCopyTextToClipboard(session: TerminalSession, text: String?) = Unit
     override fun onPasteTextFromClipboard(session: TerminalSession?) = Unit
     override fun onBell(session: TerminalSession) = Unit
     override fun onColorsChanged(session: TerminalSession) = Unit
     override fun onTerminalCursorStateChange(state: Boolean) = Unit
-    override fun getTerminalCursorStyle(): Int = 0
+    override fun getTerminalCursorStyle(): Int? = 0
 
     override fun logError(tag: String?, message: String?) = Unit
     override fun logWarn(tag: String?, message: String?) = Unit
@@ -275,12 +377,5 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient, WebSock
     override fun logStackTrace(tag: String?, e: Exception?) = Unit
 
     companion object {
-        private const val PREFS = "zmux_kotlin"
-        private const val KEY_HOST = "ws_host"
-        private const val KEY_PORT = "ws_port"
-        private const val KEY_TOKEN = "ws_token"
-
-        const val EXTRA_TOKEN = "com.zmux.terminal.TOKEN"
-        const val EXTRA_ZMUX_PACKAGE = "com.zmux.terminal.ZMUX_PACKAGE"
     }
 }

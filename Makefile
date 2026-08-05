@@ -1,9 +1,9 @@
-.PHONY: all test build lint clean protocol-check
+.PHONY: all test build lint clean protocol-check linuxenv-test
 
 all: test build
 
-# 1. Run Python RFC-6455 protocol verification (9/9 gates)
-test: protocol-check
+# 1. Run protocol and rootfs-installer regression checks.
+test: protocol-check linuxenv-test
 protocol-check:
 	@echo "--- Running ZMUX RFC-6455 Protocol Conformance Check ---"
 	@python3 experimental/zmux-kotlin/tools/mock_pty_ws_server.py --host 127.0.0.1 --port 8011 --token dev & \
@@ -11,6 +11,10 @@ protocol-check:
 	sleep 1; \
 	python3 experimental/zmux-kotlin/tools/protocol_check.py --port 8011 --token dev; \
 	kill $$MOCK_PID || true
+
+linuxenv-test:
+	@echo "--- Running Linux rootfs installer regression tests ---"
+	@PYTHONDONTWRITEBYTECODE=1 python3 experimental/zmux-kotlin/tests/test_linuxenv.py
 
 # 2. Build Android Debug APK (requires JDK 17 & Gradle/Android SDK)
 build:

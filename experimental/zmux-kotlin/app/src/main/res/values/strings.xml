@@ -8,5 +8,5 @@
     <string name="host_hint">127.0.0.1</string>
     <string name="port_hint">8001</string>
     <string name="token_hint">auth token</string>
-    <string name="boot_hint">Token is generated at runtime by security.py.\nadb shell run-as &lt;pkg&gt; cat files/.zmux_auth_token</string>
+    <string name="boot_hint">Token is generated at runtime by security.py.\nadb shell run-as &lt;pkg&gt; cat files/.zmux_auth_token\n(Type \"local\" in Host to test local shell without backend)</string>
 </resources>

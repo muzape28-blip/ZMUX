@@ -31,6 +31,10 @@ jobs:
           python3 tools/protocol_check.py --port 8011 --token dev
           kill $MOCK_PID || true
 
+      - name: Run Linux rootfs installer regression tests
+        working-directory: ./experimental/zmux-kotlin
+        run: PYTHONDONTWRITEBYTECODE=1 python3 tests/test_linuxenv.py
+
   build-android-apk:
     name: Build Android Kotlin Native UI APK
     runs-on: ubuntu-latest
