@@ -62,11 +62,14 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
         val details = mutableListOf<String>()
         var current: Throwable? = error
         while (current != null && details.size < 4) {
-            val type = current.javaClass.simpleName.ifBlank { current.javaClass.name }
-            val message = current.message?.trim()?.takeIf { it.isNotEmpty() }
+            // Take an immutable reference before the loop advances. Kotlin
+            // cannot smart-cast a mutable variable inside ifBlank's lambda.
+            val item = current ?: break
+            val type = item.javaClass.simpleName.ifBlank { item.javaClass.name }
+            val message = item.message?.trim()?.takeIf { it.isNotEmpty() }
             details += if (message == null) type else "$type: $message"
-            val next = current.cause
-            if (next === current) break
+            val next = item.cause
+            if (next === item) break
             current = next
         }
         return details.distinct().joinToString("\nCaused by: ")
