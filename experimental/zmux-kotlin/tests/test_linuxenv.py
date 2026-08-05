@@ -146,6 +146,36 @@ class LinuxEnvInstallTests(unittest.TestCase):
         self.assertEqual(linuxenv.installed_version(), "12.9")
         self.assertTrue(linuxenv.is_installed())
 
+    def test_skips_root_metadata_and_android_forbidden_dev_nodes(self) -> None:
+        """Real rootfs archives contain both of these entries on-device."""
+        archive = self.root / "rootfs-with-dev.tar.gz"
+        with tarfile.open(archive, "w:gz") as handle:
+            parent = tarfile.TarInfo("..")
+            parent.type = tarfile.DIRTYPE
+            handle.addfile(parent)
+
+            dev_dir = tarfile.TarInfo("dev")
+            dev_dir.type = tarfile.DIRTYPE
+            dev_dir.mode = 0o755
+            handle.addfile(dev_dir)
+
+            null = tarfile.TarInfo("dev/null")
+            null.type = tarfile.CHRTYPE
+            null.devmajor = 1
+            null.devminor = 3
+            handle.addfile(null)
+
+            shell = tarfile.TarInfo("bin/sh")
+            shell.size = len(b"#!/bin/sh\n")
+            shell.mode = 0o755
+            handle.addfile(shell, io.BytesIO(b"#!/bin/sh\n"))
+
+        target = self.root / "target"
+        target.mkdir()
+        linuxenv._safe_extract(archive, target)
+        self.assertTrue((target / "bin" / "sh").is_file())
+        self.assertFalse((target / "dev" / "null").exists())
+
     def test_rejects_unsafe_archive_member(self) -> None:
         archive = self.root / "unsafe.tar.gz"
         with tarfile.open(archive, "w:gz") as handle:

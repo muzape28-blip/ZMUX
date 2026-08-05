@@ -730,12 +730,18 @@ def install(progress=None, os_name="alpine") -> dict:
         shutil.rmtree(staging, ignore_errors=True)
     staging.mkdir(parents=True)
     try:
+        report("Extracting rootfs into app-private storage…\n")
         _safe_extract(tarball, staging, int(spec["strip_components"]))
+        report("Configuring Linux filesystem…\n")
         _bootstrap(staging, selected)
         # Atomic swap: never leave a half-installed rootfs at the live path.
         if rootfs_dir().exists():
             shutil.rmtree(rootfs_dir(), ignore_errors=True)
         os.replace(staging, rootfs_dir())
+    except Exception as error:
+        raise RuntimeError(
+            f"{selected.capitalize()} rootfs install failed during extraction/configuration: {error}"
+        ) from error
     finally:
         tarball.unlink(missing_ok=True)
         shutil.rmtree(staging, ignore_errors=True)
@@ -764,11 +770,21 @@ def _safe_extract(tarball: Path, target: Path, strip_components: int = 0) -> Non
         members = []
         roots: set[str] = set()
         total = 0
+        skipped_privileged = 0
         for member in archive.getmembers():
             name = member.name
             parts = tuple(part for part in Path(name).parts if part not in ("", "."))
+
+            # Alpine's official minirootfs has a harmless top-level ``..``
+            # directory metadata entry. It isn't payload and extracting it
+            # would target the staging directory's parent, so ignore exactly
+            # this root metadata entry. Never allow ``..`` in a real path.
+            if member.isdir() and parts in ((), ("..",)):
+                continue
             if name.startswith("/") or not parts or ".." in parts:
                 raise RuntimeError(f"unsafe archive member: {name!r}")
+
+            guest_parts = parts[strip_components:]
             if strip_components:
                 if len(parts) <= strip_components:
                     # The top-level directory entry itself is expected; all
@@ -779,6 +795,19 @@ def _safe_extract(tarball: Path, target: Path, strip_components: int = 0) -> Non
                         continue
                     raise RuntimeError(f"rootfs member has no path after strip: {name!r}")
                 roots.add(parts[0])
+
+            # Rootfs archives contain /dev nodes (null, zero, tty, ...). An
+            # Android app UID must never call mknod(), which is exactly the
+            # source of ``PermissionError: [Errno 1] Operation not permitted``
+            # during Debian setup. PRoot binds the real host /dev for every
+            # guest invocation, so device entries are not only uncreatable but
+            # unnecessary. This follows Termux proot-distro's --exclude=dev
+            # installation rule. Keep the empty /dev directory as a mountpoint.
+            is_dev_payload = bool(guest_parts and guest_parts[0] == "dev" and len(guest_parts) > 1)
+            if is_dev_payload or member.ischr() or member.isblk() or member.isfifo():
+                skipped_privileged += 1
+                continue
+
             if member.isfile():
                 total += member.size
                 if total > MAX_ROOTFS_BYTES:
@@ -818,6 +847,11 @@ def _bootstrap(root: Path, os_name: str) -> None:
 
     etc = root / "etc"
     etc.mkdir(parents=True, exist_ok=True)
+    # /dev payload entries are intentionally omitted: creating device nodes is
+    # forbidden to an Android app UID, and PRoot overlays the host /dev. Keep
+    # the mountpoint itself explicit for PRoot implementations which require it.
+    for mountpoint in ("dev", "proc", "sys"):
+        (root / mountpoint).mkdir(parents=True, exist_ok=True)
     if os_name == "alpine":
         apk = etc / "apk"
         apk.mkdir(parents=True, exist_ok=True)
