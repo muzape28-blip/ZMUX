@@ -14,6 +14,12 @@ class ZmuxTerminalSession(
 
     var onResize: ((Int, Int) -> Unit)? = null
 
+    fun feed(bytes: ByteArray) {
+        val emulator = TerminalSessionHelper.getEmulator(session) ?: return
+        emulator.append(bytes, bytes.size)
+        client.onTextChanged(session)
+    }
+
     fun feedLine(text: String) {
         val bytes = ("\r\n$text\r\n").toByteArray(Charsets.UTF_8)
         val emulator = TerminalSessionHelper.getEmulator(session) ?: return

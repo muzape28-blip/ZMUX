@@ -101,6 +101,9 @@ public class TerminalSessionHelper {
         }
     }
 
+    public interface ProgressCallback {
+        void invoke(String msg);
+    }
     public static int getRows(TerminalEmulator emulator) {
         if (emulator == null) return 24;
         try {

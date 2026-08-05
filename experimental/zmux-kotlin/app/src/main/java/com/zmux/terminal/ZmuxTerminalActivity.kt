@@ -282,17 +282,17 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
                     
                     val linuxenv = py.getModule("zmux.linuxenv")
                     
-                    // Define progress callback
-                    val progressCallback = object : com.chaquo.python.PyObject() {
-                        override fun call(vararg args: Any?): com.chaquo.python.PyObject? {
-                            if (args.isNotEmpty()) {
-                                zmuxSession.feed(args[0].toString().toByteArray(Charsets.UTF_8))
-                            }
-                            return null
+                    // We pass a standard Java object that implements __call__ so Chaquopy can invoke it as a Python function.
+                    // PyObject cannot be sub-classed directly. 
+                    val progressCallback = object {
+                        @Suppress("unused")
+                        fun invoke(msg: String) {
+                            zmuxSession.feed(msg.toByteArray(Charsets.UTF_8))
                         }
                     }
 
                     // Call install using Chaquopy's direct attribute invocation
+                    // Chaquopy handles generic Java objects automatically
                     linuxenv.callAttr("install", progressCallback, osName)
                     linuxenv.callAttr("install_guest_wrappers")
                     
