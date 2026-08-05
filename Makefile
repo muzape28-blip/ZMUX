@@ -15,6 +15,7 @@ protocol-check:
 linuxenv-test:
 	@echo "--- Running Linux rootfs installer regression tests ---"
 	@PYTHONDONTWRITEBYTECODE=1 python3 experimental/zmux-kotlin/tests/test_linuxenv.py
+	@PYTHONDONTWRITEBYTECODE=1 python3 experimental/zmux-kotlin/tests/test_paths_resolution.py
 
 # 2. Build Android Debug APK (requires JDK 17 & Gradle/Android SDK)
 build:

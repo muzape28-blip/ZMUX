@@ -287,7 +287,8 @@ class LegacyRootfsAdoptionTests(unittest.TestCase):
 
 
 class GuestPromptBrandingTests(unittest.TestCase):
-    """The distro-branded login prompt: zmux@alpine:~$ / zmux@debian:~$."""
+    """Distro-branded login prompt proven per guest shell:
+    zmux@alpine:~$ (busybox ash expands \w) / zmux@debian:$ (dash has no \w)."""
 
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="zmux-prompt-test-")
@@ -328,11 +329,14 @@ class GuestPromptBrandingTests(unittest.TestCase):
         linuxenv._bootstrap(root, "alpine")
         self.assertEqual(profile, (root / "etc" / "profile").read_text())  # no dupes
 
-    def test_bootstrap_brands_debian_prompt(self) -> None:
+    def test_bootstrap_brands_debian_prompt_dash_safe(self) -> None:
         root = self._guest("debian")
         linuxenv._bootstrap(root, "debian")
         profile = (root / "etc" / "profile").read_text()
-        self.assertIn("export PS1='zmux@debian:\\w$ '", profile)
+        # dash has NO \w escape: the Debian brand must be escape-free, or the
+        # prompt renders the literal "\w" seen on-device.
+        self.assertIn("export PS1='zmux@debian:$ '", profile)
+        self.assertNotIn("zmux@debian:\\w", profile)
         self.assertNotIn("zmux@alpine", profile)
 
     def test_branding_creates_missing_profile(self) -> None:
@@ -350,20 +354,74 @@ class GuestPromptBrandingTests(unittest.TestCase):
         profile = linuxenv._ROOTFS_DIR / "etc" / "profile"
         self.assertNotIn("ZMUX_PS1", profile.read_text())
         self.assertTrue(linuxenv.ensure_guest_prompt())
-        self.assertIn("export PS1='zmux@debian:\\w$ '", profile.read_text())
+        self.assertIn("export PS1='zmux@debian:$ '", profile.read_text())
         before = profile.read_text()
         linuxenv.ensure_guest_prompt()  # idempotent
         self.assertEqual(before, profile.read_text())
 
+    def test_ensure_guest_prompt_rewrites_stale_v1_brand_in_place(self) -> None:
+        # Rootfs branded by the FIRST branding build carries the
+        # dash-broken \w line; every launch must upgrade it in place.
+        root = self._guest("debian")
+        import shutil as _sh
+        _sh.copytree(root, linuxenv._ROOTFS_DIR)
+        profile = linuxenv._ROOTFS_DIR / "etc" / "profile"
+        stale = (
+            profile.read_text()
+            + "\n# ZMUX_PS1: distro-branded ZMUX guest prompt\n"
+            + "export PS1='zmux@debian:\\w$ '\n"
+        )
+        profile.write_text(stale)
+        linuxenv.ensure_guest_prompt()
+        content = profile.read_text()
+        self.assertIn("export PS1='zmux@debian:$ '", content)
+        self.assertNotIn("export PS1='zmux@debian:\\w$ '", content)
+        self.assertEqual(content.count("ZMUX_PS1"), 1)  # marker not duplicated
+        self.assertIn("export PS1='\\h:\\w\\$ '", content)  # distro default kept
+
+    def test_ensure_guest_prompt_alpine_brand_stays_busybox_expanded(self) -> None:
+        # Alpine is PROVEN working on-device with \w; never regress it.
+        root = self._guest("alpine")
+        import shutil as _sh
+        _sh.copytree(root, linuxenv._ROOTFS_DIR)
+        linuxenv.ensure_guest_prompt()
+        profile = linuxenv._ROOTFS_DIR / "etc" / "profile"
+        self.assertIn("export PS1='zmux@alpine:\\w$ '", profile.read_text())
+
     def test_ensure_guest_prompt_noop_without_install(self) -> None:
         self.assertFalse(linuxenv.ensure_guest_prompt())
 
-    def test_home_layout_writes_distro_aware_single_backslash_ps1(self) -> None:
+    def test_home_layout_writes_distro_aware_shell_proven_ps1(self) -> None:
         linuxenv.ensure_user_home_layout()
         content = (linuxenv.HOME_DIR / ".profile").read_text()
-        self.assertIn("zmux@alpine:\\w$ ", content)
-        self.assertIn("zmux@debian:\\w$ ", content)
+        self.assertIn("zmux@alpine:\\w$ ", content)  # busybox ash expands this
+        self.assertIn("zmux@debian:$ ", content)     # dash-safe: no \w
+        self.assertNotIn("zmux@debian:\\w", content)
         self.assertNotIn("\\\\w", content)  # no literal double backslash
+
+    def test_home_layout_migrates_v1_branding_lines(self) -> None:
+        # ~/.profile shipped by the FIRST branding build: Debian branch had \w.
+        profile = linuxenv.HOME_DIR / ".profile"
+        profile.parent.mkdir(parents=True, exist_ok=True)
+        v1_block = (
+            "if [ -f /etc/alpine-release ]; then\n"
+            "  export PS1='zmux@alpine:\\w$ '\n"
+            "elif [ -f /etc/debian_version ]; then\n"
+            "  export PS1='zmux@debian:\\w$ '\n"
+            "else\n"
+            "  export PS1='zmux@linux:\\w$ '\n"
+            "fi\n"
+        )
+        profile.write_text("# default from an older build\n" + v1_block)
+        linuxenv.ensure_user_home_layout()
+        content = profile.read_text()
+        self.assertIn("export PS1='zmux@debian:$ '", content)
+        self.assertIn("export PS1='zmux@linux:$ '", content)
+        self.assertIn("export PS1='zmux@alpine:\\w$ '", content)  # alpine untouched
+        self.assertIn("# default from an older build", content)  # user bytes kept
+        # Migration is idempotent.
+        linuxenv.ensure_user_home_layout()
+        self.assertEqual(content, profile.read_text())
 
     def test_home_layout_migrates_exact_legacy_ps1_lines(self) -> None:
         profile = linuxenv.HOME_DIR / ".profile"
@@ -390,7 +448,115 @@ class GuestPromptBrandingTests(unittest.TestCase):
         import shutil as _sh
         _sh.copytree(root, linuxenv._ROOTFS_DIR)
         env = linuxenv.interactive_env()
-        self.assertEqual(env["PS1"], "zmux@debian:\\w$ ")
+        self.assertEqual(env["PS1"], "zmux@debian:$ ")
+
+    def test_interactive_env_ps1_alpine_keeps_busybox_escape(self) -> None:
+        root = self._guest("alpine")
+        import shutil as _sh
+        _sh.copytree(root, linuxenv._ROOTFS_DIR)
+        env = linuxenv.interactive_env()
+        self.assertEqual(env["PS1"], "zmux@alpine:\\w$ ")
+
+
+class GuestDnsTests(unittest.TestCase):
+    """proot-distro tarballs ship the *build host's* resolv.conf (GitHub
+    Actions runners: the systemd-resolved stub 127.0.0.53). ZMUX must always
+    normalise it — that poisoned file is why apt said 'Temporary failure
+    resolving' while the identical Alpine flow resolved fine."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(prefix="zmux-dns-test-")
+        self.root = Path(self.temp.name)
+        self.old_root = linuxenv._ROOTFS_DIR
+        linuxenv._ROOTFS_DIR = self.root / "installed-rootfs"
+
+    def tearDown(self) -> None:
+        linuxenv._ROOTFS_DIR = self.old_root
+        self.temp.cleanup()
+
+    def _guest_root(self, os_name: str = "debian") -> Path:
+        root = self.root / f"{os_name}-guest"
+        (root / "bin").mkdir(parents=True)
+        (root / "bin" / "sh").write_bytes(b"#!/bin/sh\n")
+        (root / "etc").mkdir(parents=True)
+        if os_name == "alpine":
+            (root / "etc" / "alpine-release").write_text("3.22.5\n")
+        else:
+            (root / "etc" / "debian_version").write_text("12.4\n")
+        return root
+
+    def test_bootstrap_overwrites_poisoned_tarball_resolv(self) -> None:
+        root = self._guest_root("debian")
+        (root / "etc" / "resolv.conf").write_text(
+            "nameserver 127.0.0.53\noptions edns0 trust-ad\nsearch .\n"
+        )
+        good = "nameserver 8.8.8.8\nnameserver 1.1.1.1\n"
+        with patch.object(linuxenv, "_guest_resolv_conf_content", lambda: good):
+            linuxenv._bootstrap(root, "debian")
+        content = (root / "etc" / "resolv.conf").read_text()
+        self.assertEqual(content, good)
+        self.assertNotIn("127.0.0.53", content)
+
+    def test_bootstrap_replaces_symlinked_resolv_with_regular_file(self) -> None:
+        root = self._guest_root("debian")
+        # systemd-resolved style: a dangling symlink into /run.
+        (root / "etc" / "resolv.conf").symlink_to("/run/systemd/resolve/stub-resolv.conf")
+        with patch.object(
+            linuxenv, "_guest_resolv_conf_content",
+            lambda: "nameserver 8.8.8.8\nnameserver 1.1.1.1\n",
+        ):
+            linuxenv._bootstrap(root, "debian")
+        resolv = root / "etc" / "resolv.conf"
+        self.assertFalse(resolv.is_symlink())
+        self.assertTrue(resolv.is_file())
+        self.assertIn("nameserver 8.8.8.8", resolv.read_text())
+
+    def test_alpine_resolv_bytes_stay_identical(self) -> None:
+        # Alpine shipped NO resolv.conf, so the old fallback wrote exactly
+        # these bytes and it works on-device. Protect that byte-identity.
+        root = self._guest_root("alpine")
+        good = "nameserver 8.8.8.8\nnameserver 1.1.1.1\n"
+        with patch.object(linuxenv, "_guest_resolv_conf_content", lambda: good):
+            linuxenv._bootstrap(root, "alpine")
+        self.assertEqual((root / "etc" / "resolv.conf").read_text(), good)
+
+    def test_install_already_installed_heals_dns_without_redownload(self) -> None:
+        root = linuxenv._ROOTFS_DIR
+        (root / "bin").mkdir(parents=True)
+        (root / "bin" / "sh").write_bytes(b"#!/bin/sh\n")
+        (root / "etc").mkdir(parents=True)
+        (root / "etc" / "debian_version").write_text("12.4\n")
+        (root / "etc" / ".zmux-rootfs").write_text("debian\n")
+        (root / "etc" / "resolv.conf").write_text("nameserver 127.0.0.53\n")
+        with patch.object(
+            linuxenv, "_guest_resolv_conf_content",
+            lambda: "nameserver 8.8.8.8\nnameserver 1.1.1.1\n",
+        ):
+            result = linuxenv.install(progress=None, os_name="debian")
+        self.assertTrue(result["already"])
+        self.assertNotIn("127.0.0.53", (root / "etc" / "resolv.conf").read_text())
+        self.assertIn("nameserver 8.8.8.8", (root / "etc" / "resolv.conf").read_text())
+
+    def test_guest_resolv_conf_content_prefers_wellformed_host_nameservers(self) -> None:
+        host = self.root / "host-resolv.conf"
+        host.write_text(
+            "# generated\nnameserver 9.9.9.9\n"
+            "search lan\noptions edns0\nnameserver 1.0.0.1 extra-junk\n"
+            "nameserver 1.1.1.1\n"
+        )
+        content = linuxenv._guest_resolv_conf_content(host)
+        self.assertEqual(content, "nameserver 9.9.9.9\nnameserver 1.1.1.1\n")
+        # Unusable host file -> public fallback.
+        host.write_text("# nothing\nsearch lan\n")
+        self.assertEqual(
+            linuxenv._guest_resolv_conf_content(host),
+            "nameserver 8.8.8.8\nnameserver 1.1.1.1\n",
+        )
+        # Missing host file -> public fallback (this is the Android case).
+        self.assertEqual(
+            linuxenv._guest_resolv_conf_content(self.root / "no-such-file"),
+            "nameserver 8.8.8.8\nnameserver 1.1.1.1\n",
+        )
 
 
 if __name__ == "__main__":

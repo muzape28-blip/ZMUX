@@ -562,18 +562,38 @@ def build_interactive_argv(host_cwd: Path) -> list:
     return argv
 
 
-#: Distro-aware PS1 block written into ~/.profile on first use. Single
-#: backslashes are intentional: the shell expands \w to the working directory
-#: at prompt-render time (~ inside $HOME). A literal $ (not \$) is deliberate:
-#: PRoot fakes uid 0, and # would wrongly imply Android-root privilege.
+#: Distro-branded PS1 values, proven against each guest's real /bin/sh:
+#: Alpine's busybox ash expands \w (cwd with ~ abbreviation); Debian's dash
+#: knows only \! and \\, so \w renders as a literal "\w" — the exact
+#: "zmux@debian:\w$" seen on-device. Debian gets an escape-free prompt.
+#: A literal trailing $ (not \$) stays deliberate everywhere: PRoot fakes
+#: uid 0, and a # would wrongly imply Android-root privilege.
+def _guest_ps1_value(os_name: str) -> str:
+    """Guest prompt value; only Alpine's busybox ash may use shell escapes."""
+    if os_name == "alpine":
+        return "zmux@alpine:\\w$ "
+    if os_name == "debian":
+        return "zmux@debian:$ "
+    return "zmux@linux:$ "
+
+
+#: Distro-aware PS1 block written into ~/.profile on first use.
 _GUEST_PS1_BLOCK = (
     "if [ -f /etc/alpine-release ]; then\n"
-    "  export PS1='zmux@alpine:\\w$ '\n"
+    f"  export PS1='{_guest_ps1_value('alpine')}'\n"
     "elif [ -f /etc/debian_version ]; then\n"
-    "  export PS1='zmux@debian:\\w$ '\n"
+    f"  export PS1='{_guest_ps1_value('debian')}'\n"
     "else\n"
-    "  export PS1='zmux@linux:\\w$ '\n"
+    f"  export PS1='{_guest_ps1_value('linux')}'\n"
     "fi"
+)
+
+#: The exact PS1 lines the FIRST branding build wrote for Debian (and the
+#: default branch): \w is dash-incompatible and displayed as a literal
+#: "\w". Migrated line-wise so user files keep every other byte intact.
+_V1_BRANDING_PS1_MAP = (
+    ("export PS1='zmux@debian:\\w$ '", "export PS1='zmux@debian:$ '"),
+    ("export PS1='zmux@linux:\\w$ '", "export PS1='zmux@linux:$ '"),
 )
 
 #: Exact default PS1 lines older ZMUX builds emitted into ~/.profile. They
@@ -611,10 +631,25 @@ def ensure_user_home_layout() -> None:
         # Android-root privilege with `#`.
         try:
             old = profile.read_text(encoding="utf-8")
-            for stale in _LEGACY_PROFILE_PS1_LINES:
-                if stale in old:
-                    profile.write_text(old.replace(stale, _GUEST_PS1_BLOCK), encoding="utf-8")
-                    break
+            migrated = old
+            # Legacy default lines are matched as EXACT TOP-LEVEL lines only:
+            # the distro-aware block itself contains the same PS1 line, but
+            # indented — substring matching would re-nest the whole block on
+            # every launch (a latent double-branding bug).
+            if _GUEST_PS1_BLOCK not in migrated:
+                lines = migrated.split("\n")
+                if any(line in _LEGACY_PROFILE_PS1_LINES for line in lines):
+                    migrated = "\n".join(
+                        _GUEST_PS1_BLOCK if line in _LEGACY_PROFILE_PS1_LINES else line
+                        for line in lines
+                    )
+            # The FIRST branding build left a dash-incompatible \w in the
+            # Debian branch of the block. Line-wise replacement keeps every
+            # other byte of the user's profile authoritative.
+            for stale, fresh in _V1_BRANDING_PS1_MAP:
+                migrated = migrated.replace(stale, fresh)
+            if migrated != old:
+                profile.write_text(migrated, encoding="utf-8")
         except OSError:
             pass
 
@@ -635,7 +670,7 @@ def interactive_env() -> dict:
     # root. The guest is a normal Alpine userland rooted at its own /.
     env["USER"] = "zmux"
     env["LOGNAME"] = "zmux"
-    env["PS1"] = f"zmux@{installed_os() or 'linux'}:\\w$ "
+    env["PS1"] = _guest_ps1_value(installed_os())
     return env
 
 
@@ -794,6 +829,10 @@ def install(progress=None, os_name="alpine") -> dict:
     selected = str(spec["os_name"])
     current = installed_os()
     if current == selected:
+        # Repair hook: an already-installed rootfs still gets its DNS config
+        # normalised here (proot-distro resolv.conf poisoning), without a
+        # re-download. Cheap, idempotent, heals the very first broken install.
+        _ensure_guest_dns(rootfs_dir())
         return {
             "ok": True,
             "already": True,
@@ -970,30 +1009,44 @@ def _safe_extract(tarball: Path, target: Path, strip_components: int = 0) -> Non
         payload.rmdir()
 
 
-def _install_guest_prompt(root: Path, os_name: str) -> None:
-    """Brand the login-shell prompt for the selected guest (zmux@alpine:~$ …).
+_PS1_MARKER = "# ZMUX_PS1: distro-branded ZMUX guest prompt"
 
-    The distro /etc/profile sets its own PS1 (Alpine: ``\\h:\\w\\$`` →
-    ``localhost:~#``), which is exactly what users saw after login. Appending
-    a marker-guarded export makes ZMUX's brand win for login shells without
-    editing the packaged lines. PRoot ``-0`` makes the shell run as uid 0, so
-    PS1's ``\\$`` would render ``#``; a literal ``$`` is written on purpose —
-    ``#`` would wrongly imply Android-root privilege inside a PRoot sandbox.
-    Both Alpine's ash and Debian's dash expand ``\\w`` at prompt-render time
-    (with ~ abbreviation), and both source /etc/profile for login shells.
-    Cosmetic and idempotent: never lets an OSError fail an install or launch.
+
+def _install_guest_prompt(root: Path, os_name: str) -> None:
+    """Brand the login-shell prompt with a value PROVEN on the guest's shell.
+
+    The distro /etc/profile sets its own PS1 (Alpine: \h:\w\$; Debian: a
+    plain #), which is what users saw after login. Appending a marker-guarded
+    export makes ZMUX's brand win for login shells without editing packaged
+    lines. The value is per-OS because the shells genuinely differ: busybox
+    ash (Alpine) expands \w to the cwd; dash (Debian) has NO \w escape at
+    all and renders it literally — that first branding is exactly what
+    showed up on-device as "zmux@debian:\w$". A stale ZMUX_PS1 block with
+    the old value is rewritten in place, healing already-installed rootfses
+    on every launch; everything else in the file stays byte-identical.
+    PRoot -0 fakes uid 0, so a literal trailing $ is written on purpose — a
+    # would wrongly imply Android-root privilege. Cosmetic only: an OSError
+    here must never fail an install or a launch.
     """
     profile = root / "etc" / "profile"
-    ps1 = f"zmux@{os_name}:\\w$ "
+    desired = f"export PS1='{_guest_ps1_value(os_name)}'"
     try:
-        if profile.is_file():
-            current = profile.read_text("utf-8", errors="replace")
-        else:
-            current = ""
-        if "ZMUX_PS1" in current:
+        current = profile.read_text("utf-8", errors="replace") if profile.is_file() else ""
+        if desired in current:
             return
-        with profile.open("a", encoding="utf-8", newline="\n") as out:
-            out.write(f"\n# ZMUX_PS1: distro-branded ZMUX guest prompt\nexport PS1='{ps1}'\n")
+        kept = []
+        for line in current.splitlines():
+            if line.strip() == _PS1_MARKER:
+                continue
+            if line.startswith("export PS1='zmux@") and line.rstrip().endswith("'"):
+                continue
+            kept.append(line)
+        text = "\n".join(kept).rstrip("\n")
+        profile.write_text(
+            (text + "\n" if text else "") + f"\n{_PS1_MARKER}\n{desired}\n",
+            encoding="utf-8",
+            newline="\n",
+        )
     except OSError:
         pass
 
@@ -1011,6 +1064,51 @@ def ensure_guest_prompt() -> bool:
         return False
     _install_guest_prompt(rootfs_dir(), os_name)
     return True
+
+
+def _guest_resolv_conf_content(host_path: Path | None = None) -> str:
+    """Deterministic DNS resolver config for the guest.
+
+    Host ``nameserver`` lines win when readable and well-formed; public
+    resolvers otherwise. Host ``search``/``options`` lines are intentionally
+    dropped: Android has no /etc/resolv.conf at all, and any other host's
+    search domains mean nothing inside the guest.
+    """
+    host = host_path if host_path is not None else Path("/etc/resolv.conf")
+    try:
+        if host.is_file():
+            nameservers = []
+            for line in host.read_text("utf-8", errors="replace").splitlines():
+                parts = line.split()
+                if len(parts) == 2 and parts[0] == "nameserver":
+                    nameservers.append(f"nameserver {parts[1]}")
+            if nameservers:
+                return "\n".join(nameservers) + "\n"
+    except OSError:
+        pass
+    return "nameserver 8.8.8.8\nnameserver 1.1.1.1\n"
+
+
+def _ensure_guest_dns(root: Path) -> None:
+    """Write the guest /etc/resolv.conf deterministically — ALWAYS.
+
+    proot-distro tarballs ship the *build host's* resolv.conf: mmdebstrap
+    copies /etc/resolv.conf into every rootfs (documented in mmdebstrap(1),
+    "setup" step), and the GitHub Actions runners building them use the
+    systemd-resolved stub ``nameserver 127.0.0.53``, which answers nothing
+    on a phone — apt then fails with
+    ``Temporary failure resolving 'deb.debian.org'``. Alpine's minirootfs
+    ships no such file, which is exactly why only Debian broke. Overwrite
+    unconditionally: poisoned content and dangling symlinks included.
+    Cosmetic file: never lets an OSError fail an install or a heal.
+    """
+    resolv = Path(root) / "etc" / "resolv.conf"
+    try:
+        if resolv.is_symlink():
+            resolv.unlink()
+        resolv.write_text(_guest_resolv_conf_content(), encoding="utf-8")
+    except OSError:
+        pass
 
 
 def _bootstrap(root: Path, os_name: str) -> None:
@@ -1042,18 +1140,9 @@ def _bootstrap(root: Path, os_name: str) -> None:
     elif not (etc / "debian_version").is_file():
         raise RuntimeError("Debian rootfs is missing /etc/debian_version after extraction")
 
-    # DNS: prefer the host's resolv.conf; fall back to public resolvers.
-    host_resolv = Path("/etc/resolv.conf")
-    if host_resolv.is_file():
-        try:
-            content = host_resolv.read_text("utf-8", errors="replace")
-            if content.strip():
-                (etc / "resolv.conf").write_text(content, encoding="utf-8")
-        except OSError:
-            pass
-    resolv = etc / "resolv.conf"
-    if not resolv.is_file():
-        resolv.write_text("nameserver 8.8.8.8\nnameserver 1.1.1.1\n", encoding="utf-8")
+    # DNS: proot-distro ships the *build host's* resolv.conf (127.0.0.53
+    # stub) in its tarballs — never trust tarball content; ALWAYS normalise.
+    _ensure_guest_dns(root)
     _install_guest_prompt(root, os_name)
     (etc / ROOTFS_OS_MARKER).write_text(f"{os_name}\n", encoding="utf-8")
 

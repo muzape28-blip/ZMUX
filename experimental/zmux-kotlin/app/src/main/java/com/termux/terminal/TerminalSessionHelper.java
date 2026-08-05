@@ -138,7 +138,11 @@ public class TerminalSessionHelper {
             "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
             // Fallback PS1 for shells which skip /etc/profile; login shells get
             // the same brand from the ZMUX_PS1 export linuxenv installs there.
-            "PS1=zmux@" + ((osName != null && !osName.isEmpty()) ? osName : "linux") + ":\\w$ ",
+            // MUST mirror linuxenv._guest_ps1_value: busybox ash (Alpine)
+            // expands \w to the cwd; Debian's dash has NO \w escape and would
+            // render it literally ("zmux@debian:\w$" as reported on-device).
+            "PS1=zmux@" + ((osName != null && !osName.isEmpty()) ? osName : "linux")
+                    + ("alpine".equals(osName) ? ":\\w$ " : ":$ "),
             "LD_LIBRARY_PATH=" + nativeLibraryDir,
             "PROOT_LOADER=" + loader,
             "PROOT_TMP_DIR=" + cache.getAbsolutePath(),
