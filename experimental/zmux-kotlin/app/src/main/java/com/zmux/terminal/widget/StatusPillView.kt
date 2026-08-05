@@ -7,7 +7,6 @@ import android.graphics.RectF
 import android.os.SystemClock
 import android.util.AttributeSet
 import android.view.View
-import com.zmux.terminal.WebSocketPtyBridge
 import com.zmux.terminal.ZmuxTheme
 import kotlin.math.sin
 
@@ -39,7 +38,9 @@ class StatusPillView @JvmOverloads constructor(
 
     private val bounds = RectF()
 
-    private var state: WebSocketPtyBridge.State = WebSocketPtyBridge.State.IDLE
+    enum class State { IDLE, CONNECTING, CONNECTED, RECONNECTING, DISCONNECTED, UNAUTHORIZED, FAILED }
+
+    private var state: State = State.IDLE
     private var label: String = "idle"
     private var animating = false
 
@@ -51,15 +52,15 @@ class StatusPillView @JvmOverloads constructor(
         }
     }
 
-    fun setState(state: WebSocketPtyBridge.State, detail: String?) {
+    fun setState(state: State, detail: String?) {
         this.state = state
         this.label = buildString {
             append(state.name.lowercase())
             if (!detail.isNullOrBlank()) append("  ").append(detail)
         }
 
-        val shouldAnimate = state == WebSocketPtyBridge.State.CONNECTING ||
-            state == WebSocketPtyBridge.State.RECONNECTING
+        val shouldAnimate = state == State.CONNECTING ||
+            state == State.RECONNECTING
         if (shouldAnimate && !animating) {
             animating = true
             postOnAnimation(ticker)
@@ -72,11 +73,11 @@ class StatusPillView @JvmOverloads constructor(
     }
 
     private fun accent(): Int = when (state) {
-        WebSocketPtyBridge.State.CONNECTED -> ZmuxTheme.TEAL
-        WebSocketPtyBridge.State.CONNECTING,
-        WebSocketPtyBridge.State.RECONNECTING -> ZmuxTheme.AMBER
-        WebSocketPtyBridge.State.UNAUTHORIZED,
-        WebSocketPtyBridge.State.FAILED -> ZmuxTheme.ROSE
+        State.CONNECTED -> ZmuxTheme.TEAL
+        State.CONNECTING,
+        State.RECONNECTING -> ZmuxTheme.AMBER
+        State.UNAUTHORIZED,
+        State.FAILED -> ZmuxTheme.ROSE
         else -> ZmuxTheme.TEXT_DIM
     }
 

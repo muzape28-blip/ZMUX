@@ -94,7 +94,7 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
             activeSession()?.let { it.onResize?.invoke(it.columns, it.rows) }
         }
 
-        statusPill.setState(WebSocketPtyBridge.State.CONNECTED, "local shell")
+        statusPill.setState(StatusPillView.State.CONNECTED, "local shell")
 
         newSessionButton.setOnClickListener { createNewSession() }
 
