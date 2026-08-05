@@ -84,6 +84,59 @@ public class TerminalSessionHelper {
         return new TerminalSession("/system/bin/sh", filesDir, new String[0], env, 2000, client);
     }
 
+    /**
+     * Create the actual guest terminal after linux-setup succeeds.
+     *
+     * Android only permits executing app-owned native code from
+     * nativeLibraryDir, hence PRoot itself is launched from libproot.so there.
+     * PRoot then enters the app-private rootfs and execs guest /bin/sh through
+     * the same kernel PTY used by TerminalSession. Device files are supplied by
+     * PRoot binds; rootfs extraction intentionally leaves them out because an
+     * app UID cannot create mknod entries.
+     */
+    public static TerminalSession createLinuxSession(
+            TerminalSessionClient client,
+            String filesDir,
+            String prootPath,
+            String nativeLibraryDir,
+            String rootfsDir,
+            String homeDir) {
+        java.io.File rootfs = new java.io.File(rootfsDir);
+        java.io.File home = new java.io.File(homeDir);
+        java.io.File cache = new java.io.File(filesDir, "cache");
+        home.mkdirs();
+        cache.mkdirs();
+
+        String loader = new java.io.File(nativeLibraryDir, "libproot-loader.so").getAbsolutePath();
+        String[] args = new String[] {
+            "--kill-on-exit",
+            "--link2symlink",
+            "--sysvipc",
+            "-0",
+            "-r", rootfs.getAbsolutePath(),
+            "-b", "/dev",
+            "-b", "/proc",
+            "-b", "/sys",
+            "-b", home.getAbsolutePath() + ":/root",
+            "-w", "/root",
+            "/bin/sh", "-l",
+        };
+        String[] env = new String[] {
+            "HOME=/root",
+            "USER=zmux",
+            "LOGNAME=zmux",
+            "SHELL=/bin/sh",
+            "TERM=xterm-256color",
+            "LANG=C.UTF-8",
+            "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "PS1=zmux@linux:\\w$ ",
+            "LD_LIBRARY_PATH=" + nativeLibraryDir,
+            "PROOT_LOADER=" + loader,
+            "PROOT_TMP_DIR=" + cache.getAbsolutePath(),
+        };
+        return new TerminalSession(prootPath, filesDir, args, env, 2000, client);
+    }
+
     public static TerminalEmulator getEmulator(TerminalSession session) {
         try {
             Field f = TerminalSession.class.getDeclaredField("mEmulator");

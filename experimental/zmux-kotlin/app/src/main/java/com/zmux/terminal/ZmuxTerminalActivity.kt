@@ -161,6 +161,45 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
         }
     }
 
+    /** Replace the bootstrap host shell with PRoot -> guest /bin/sh in the same tab. */
+    private fun launchLinuxSession(
+        bootstrapSession: ZmuxTerminalSession,
+        prootPath: String,
+        osName: String,
+    ) {
+        runOnUiThread {
+            if (isFinishing || isDestroyed) return@runOnUiThread
+            val index = sessions.indexOf(bootstrapSession)
+            if (index < 0) return@runOnUiThread
+
+            val rootfs = java.io.File(filesDir, "linux/rootfs")
+            if (!rootfs.isDirectory) {
+                appendTerminalLine(
+                    bootstrapSession,
+                    "\u001b[31m[Chaquopy Error]\u001b[0m Rootfs path disappeared before PRoot launch: $rootfs"
+                )
+                return@runOnUiThread
+            }
+
+            // Stop the Android mksh process which waited for .setup_done, then
+            // attach a fresh kernel PTY whose child is PRoot and guest /bin/sh.
+            bootstrapSession.finishIfRunning()
+            val linuxSession = ZmuxTerminalSession(
+                this,
+                prootPath,
+                applicationInfo.nativeLibraryDir,
+                rootfs.absolutePath,
+                java.io.File(filesDir, "home").absolutePath,
+            )
+            sessions[index] = linuxSession
+            activeSessionIndex = index
+            terminalView.attachSession(linuxSession.session)
+            statusPill.setState(StatusPillView.State.CONNECTED, "$osName via PRoot")
+            renderLocalTabs()
+            terminalView.requestFocus()
+        }
+    }
+
     // ------------------------------------------------------- virtual keys (T3)
     private fun buildVirtualKeys() {
         val container = findViewById<LinearLayout>(R.id.virtual_keys)
@@ -296,7 +335,8 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
                             "Install the APK build containing libproot.so to launch the Linux shell."
                     )
                 } else {
-                    appendTerminalLine(zmuxSession, "${esc}[32m[Chaquopy]${esc}[0m PRoot binary verified at $proot")
+                    appendTerminalLine(zmuxSession, "${esc}[32m[Chaquopy]${esc}[0m PRoot verified at $proot — launching $installedOs shell…")
+                    launchLinuxSession(zmuxSession, proot, installedOs)
                 }
             } catch (error: Throwable) {
                 // Do not call Python traceback.format_exc() here: this is a Kotlin catch
