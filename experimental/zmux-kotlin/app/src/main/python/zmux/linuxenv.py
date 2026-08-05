@@ -618,6 +618,14 @@ def _hashlib_sha512():
 def _safe_extract(tarball: Path, target: Path) -> None:
     """Extract the minirootfs with path-traversal protection."""
     mode = "r:xz" if tarball.name.endswith(".xz") else "r:gz"
+    
+    # Import lzma dynamically to catch if it's missing in some python distributions
+    if mode == "r:xz":
+        try:
+            import lzma
+        except ImportError:
+            raise RuntimeError("Debian installation failed: The 'lzma' python module is missing in this build. Please select Alpine.")
+
     with tarfile.open(tarball, mode) as archive:
         members = []
         total = 0
