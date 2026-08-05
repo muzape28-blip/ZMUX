@@ -1,3 +1,5 @@
+import java.util.zip.ZipFile
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -113,7 +115,7 @@ tasks.register("verifyDebugProotPackage") {
     doLast {
         val apk = layout.buildDirectory.file("outputs/apk/debug/app-debug.apk").get().asFile
         check(apk.isFile) { "debug APK was not produced: $apk" }
-        java.util.zip.ZipFile(apk).use { zip ->
+        ZipFile(apk).use { zip ->
             val missing = prootAbis.flatMap { abi ->
                 prootLibraries.mapNotNull { library ->
                     val entry = "lib/$abi/$library"
