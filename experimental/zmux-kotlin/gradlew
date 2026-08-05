@@ -9,7 +9,18 @@ gradle "$@" > error.log 2>&1
 exit_code=$?
 if [ "$exit_code" -ne 0 ]; then
     echo "::group::Gradle failure summary"
-    grep -E -i '(^e: |^error:|^failure:|what went wrong|execution failed|exception|could not|unresolved reference|type mismatch)' error.log | tail -n 120 || true
+    pattern='(^e: |^error:|^failure:|what went wrong|execution failed|exception|could not|unresolved reference|type mismatch)'
+    diagnostics=$(grep -E -i "$pattern" error.log | tail -n 80 || true)
+    printf '%s\n' "$diagnostics"
+    # Add compact, searchable diagnostics to the GitHub Checks annotation API.
+    # This is intentionally one line per match: long annotations are truncated.
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        escaped=${line//'%'/'%25'}
+        escaped=${escaped//$'\r'/'%0D'}
+        escaped=${escaped//$'\n'/'%0A'}
+        echo "::error title=Gradle diagnostic::${escaped}"
+    done <<< "$diagnostics"
     echo "--- final Gradle output ---"
     tail -n 100 error.log
     echo "::endgroup::"
