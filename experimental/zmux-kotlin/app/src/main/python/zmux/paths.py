@@ -8,6 +8,7 @@ All runtime directories are app-private and gitignored.
 import os
 import shlex
 import stat
+import sys
 from pathlib import Path
 
 from zmux.command_registry import WRAPPER_COMMANDS
@@ -28,16 +29,40 @@ def _is_writable(path: Path) -> bool:
 def resolve_app_dir() -> Path:
     """
     Resolve the application directory based on runtime environment.
-    
+
     Priority:
-    1. ANDROID_PRIVATE / ANDROID_ARGUMENT / ANDROID_APP_PATH env vars (p4a webview bootstrap)
-    2. Fallback: project root (where main.py lives) for desktop development
-    3. Safe Android / POSIX writable fallbacks
+    1. ZMUX_APP_DIR env var — the embedding Android host (Kotlin/Chaquopy)
+       passes its real Context.getFilesDir() here before Python starts.
+    2. ANDROID_PRIVATE / ANDROID_ARGUMENT / ANDROID_APP_PATH env vars
+       (python-for-android webview bootstrap).
+    3. Chaquopy runtime: HOME is pinned to the app's filesDir.
+    4. Fallback: project root (where main.py lives) for desktop development.
+    5. Safe Android / POSIX writable fallbacks.
     """
+    override = os.environ.get("ZMUX_APP_DIR")
+    if override:
+        candidate = Path(override)
+        if _is_writable(candidate):
+            return candidate
+
     for env_key in ("ANDROID_PRIVATE", "ANDROID_ARGUMENT", "ANDROID_APP_PATH"):
         val = os.environ.get(env_key)
         if val:
             candidate = Path(val)
+            if _is_writable(candidate):
+                return candidate
+
+    # Chaquopy embeds CPython on Android directly: the python-for-android
+    # variables above stay unset, but Chaquopy pins os.environ["HOME"] to
+    # Context.getFilesDir(). THAT directory — not Path(__file__).parent
+    # (Chaquopy's AssetFinder extraction dir under files/chaquopy/...) — is
+    # where the Kotlin terminal looks for linux/rootfs. Resolving APP_DIR
+    # from __file__ here is exactly what made a successful install look
+    # "disappeared" to the PRoot launch check.
+    if hasattr(sys, "getandroidapilevel"):
+        home = os.environ.get("HOME", "")
+        if home:
+            candidate = Path(home)
             if _is_writable(candidate):
                 return candidate
 

@@ -16,6 +16,7 @@ class ZmuxTerminalSession(
     nativeLibraryDir: String? = null,
     rootfsDir: String? = null,
     homeDir: String? = null,
+    cacheDir: String? = null,
 ) {
     val session: TerminalSession
 
@@ -34,6 +35,7 @@ class ZmuxTerminalSession(
                 nativeLibraryDir,
                 rootfsDir,
                 homeDir,
+                cacheDir,
             )
         } else {
             TerminalSessionHelper.createLocalSession(client, filesDir)

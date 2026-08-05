@@ -229,5 +229,62 @@ class LinuxEnvInstallTests(unittest.TestCase):
             linuxenv._safe_extract(archive, target)
 
 
+class LegacyRootfsAdoptionTests(unittest.TestCase):
+    """Pre-fix builds left a complete rootfs inside the Chaquopy AssetFinder
+    dir; upgrading must adopt it instead of forcing a ~100 MiB redownload."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(prefix="zmux-adopt-test-")
+        self.root = Path(self.temp.name)
+        # The legacy layout: <package_root>/linux/rootfs derived from __file__.
+        self.legacy_pkg_root = self.root / "chaquopy" / "AssetFinder" / "app"
+        self.legacy_rootfs = self.legacy_pkg_root / "linux" / "rootfs"
+        (self.legacy_rootfs / "bin").mkdir(parents=True)
+        (self.legacy_rootfs / "bin" / "sh").write_bytes(b"#!/bin/sh\n")
+        (self.legacy_rootfs / "etc").mkdir()
+        (self.legacy_rootfs / "etc" / "alpine-release").write_text("3.22.5\n")
+        # The new, post-fix install location.
+        self.new_rootfs = self.root / "filesdir" / "linux" / "rootfs"
+        self.old_rootfs_dir = linuxenv._ROOTFS_DIR
+        linuxenv._ROOTFS_DIR = self.new_rootfs
+        self._android_patch = patch.object(sys, "getandroidapilevel", lambda: 35, create=True)
+        self._android_patch.start()
+
+    def tearDown(self) -> None:
+        self._android_patch.stop()
+        linuxenv._ROOTFS_DIR = self.old_rootfs_dir
+        self.temp.cleanup()
+
+    def _call(self) -> None:
+        fake_module_file = self.legacy_pkg_root / "zmux" / "linuxenv.py"
+        with patch.object(linuxenv, "__file__", str(fake_module_file)):
+            linuxenv._adopt_legacy_rootfs()
+
+    def test_adopts_complete_legacy_rootfs(self) -> None:
+        self._call()
+        self.assertFalse(self.legacy_rootfs.exists())
+        self.assertTrue((self.new_rootfs / "bin" / "sh").is_file())
+        self.assertEqual(linuxenv.installed_os(), "alpine")
+
+    def test_skips_when_new_rootfs_already_exists(self) -> None:
+        self.new_rootfs.mkdir(parents=True)
+        (self.new_rootfs / "newer").write_text("x")
+        self._call()
+        self.assertTrue(self.legacy_rootfs.is_dir())  # untouched
+        self.assertEqual((self.new_rootfs / "newer").read_text(), "x")
+
+    def test_skips_incomplete_legacy_rootfs(self) -> None:
+        (self.legacy_rootfs / "bin" / "sh").unlink()
+        self._call()
+        self.assertTrue(self.legacy_rootfs.is_dir())
+        self.assertFalse(self.new_rootfs.exists())
+
+    def test_never_touches_explicit_rootfs_override(self) -> None:
+        with patch.dict(os.environ, {"ZMUX_ROOTFS_DIR": str(self.new_rootfs)}):
+            self._call()
+        self.assertTrue(self.legacy_rootfs.is_dir())
+        self.assertFalse(self.new_rootfs.exists())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

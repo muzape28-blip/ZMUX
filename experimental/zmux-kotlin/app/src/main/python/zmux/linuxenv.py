@@ -228,6 +228,38 @@ def _guest_regular_file(root: Path, guest_path: str) -> bool:
     return False
 
 
+def _adopt_legacy_rootfs() -> None:
+    """Move a rootfs installed by pre-fix builds into the resolved location.
+
+    Builds which resolved ``APP_DIR`` from ``__file__`` installed the rootfs
+    inside Chaquopy's AssetFinder extraction directory
+    (``<filesDir>/chaquopy/AssetFinder/app/linux/rootfs``) while the Kotlin
+    terminal checked ``<filesDir>/linux/rootfs`` — the install "succeeded"
+    yet the shell launch reported the path as missing. After upgrading, a
+    redownload would waste ~100 MiB of mobile data, so adopt the legacy tree
+    once. Device-only, best-effort, never touches explicit ZMUX_ROOTFS_DIR
+    overrides, existing rootfses, or incomplete extractions.
+    """
+    if "ZMUX_ROOTFS_DIR" in os.environ or not hasattr(sys, "getandroidapilevel"):
+        return
+    try:
+        legacy_dir = Path(__file__).resolve().parent.parent / "linux" / "rootfs"
+        current_dir = _ROOTFS_DIR.resolve()
+        if legacy_dir == current_dir or current_dir.exists():
+            return
+        if not legacy_dir.is_dir() or not _guest_regular_file(legacy_dir, "/bin/sh"):
+            return
+        # Both paths live under the same filesDir, so os.replace is atomic.
+        current_dir.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(legacy_dir, current_dir)
+    except OSError:
+        # Adoption is a convenience; a normal reinstall remains the fallback.
+        pass
+
+
+_adopt_legacy_rootfs()
+
+
 def installed_os() -> str:
     """Return the installed guest name, or ``""`` when no complete rootfs exists.
 

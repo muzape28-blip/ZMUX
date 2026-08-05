@@ -100,10 +100,16 @@ public class TerminalSessionHelper {
             String prootPath,
             String nativeLibraryDir,
             String rootfsDir,
-            String homeDir) {
+            String homeDir,
+            String cacheDir) {
         java.io.File rootfs = new java.io.File(rootfsDir);
         java.io.File home = new java.io.File(homeDir);
-        java.io.File cache = new java.io.File(filesDir, "cache");
+        // PROOT_TMP_DIR must match zmux.paths.CACHE_DIR (the Python side also
+        // writes there); fall back to the historical filesDir/cache when the
+        // caller has no authoritative value.
+        java.io.File cache = (cacheDir != null && !cacheDir.isEmpty())
+                ? new java.io.File(cacheDir)
+                : new java.io.File(filesDir, "cache");
         home.mkdirs();
         cache.mkdirs();
 

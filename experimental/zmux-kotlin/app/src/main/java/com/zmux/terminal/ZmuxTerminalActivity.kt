@@ -79,6 +79,18 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
         super.onCreate(savedInstanceState)
         
         if (!Python.isStarted()) {
+            // Chaquopy does not define the ANDROID_* vars zmux.paths keys on,
+            // and its AssetFinder extraction dir is NOT the app filesDir —
+            // resolving APP_DIR from __file__ there is what stranded installed
+            // rootfses. Hand the embedded interpreter the authoritative
+            // app-private root before it starts (os.environ is snapshot at
+                // interpreter init). zmux.paths also detects the Chaquopy HOME pin
+            // as a fallback if this setenv is unavailable.
+            try {
+                android.system.Os.setenv("ZMUX_APP_DIR", filesDir.absolutePath, true)
+            } catch (_: Exception) {
+                // Hardening only; the HOME-pin branch in zmux.paths covers this.
+            }
             Python.start(AndroidPlatform(this))
         }
 
@@ -166,17 +178,24 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
         bootstrapSession: ZmuxTerminalSession,
         prootPath: String,
         osName: String,
+        rootfsPath: String,
+        homePath: String,
+        cachePath: String,
     ) {
         runOnUiThread {
             if (isFinishing || isDestroyed) return@runOnUiThread
             val index = sessions.indexOf(bootstrapSession)
             if (index < 0) return@runOnUiThread
 
-            val rootfs = java.io.File(filesDir, "linux/rootfs")
+            // The path comes from the Python installer itself (single source of
+            // truth). This is ONLY a final race guard: something deleted the
+            // rootfs between install() returning and this UI-thread switch.
+            val rootfs = java.io.File(rootfsPath)
             if (!rootfs.isDirectory) {
                 appendTerminalLine(
                     bootstrapSession,
-                    "\u001b[31m[Chaquopy Error]\u001b[0m Rootfs path disappeared before PRoot launch: $rootfs"
+                    "\u001b[31m[Chaquopy Error]\u001b[0m Rootfs path disappeared before PRoot launch: " +
+                        "${rootfs.absolutePath} (run linux-setup again or report this)"
                 )
                 return@runOnUiThread
             }
@@ -189,7 +208,8 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
                 prootPath,
                 applicationInfo.nativeLibraryDir,
                 rootfs.absolutePath,
-                java.io.File(filesDir, "home").absolutePath,
+                homePath,
+                cachePath,
             )
             sessions[index] = linuxSession
             activeSessionIndex = index
@@ -338,8 +358,20 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
                             "This APK is incomplete; the build now rejects APKs missing PRoot."
                     )
                 } else {
+                    // Single source of truth: ask the Python installer where the
+                    // rootfs/home/cache actually are. Re-deriving them here as
+                    // filesDir/<name> previously disagreed with zmux.paths and
+                    // stranded a fully installed rootfs.
+                    val pathsModule = py.getModule("zmux.paths")
+                    val rootfsPath = linuxenv.callAttr("rootfs_dir").toString()
+                    val homePath = pathsModule.get("HOME_DIR")?.toString()
+                        ?.takeIf { it.isNotBlank() }
+                        ?: java.io.File(filesDir, "home").absolutePath
+                    val cachePath = pathsModule.get("CACHE_DIR")?.toString()
+                        ?.takeIf { it.isNotBlank() }
+                        ?: java.io.File(filesDir, "cache").absolutePath
                     appendTerminalLine(zmuxSession, "${esc}[32m[Chaquopy]${esc}[0m PRoot verified at $proot — launching $installedOs shell…")
-                    launchLinuxSession(zmuxSession, proot, installedOs)
+                    launchLinuxSession(zmuxSession, proot, installedOs, rootfsPath, homePath, cachePath)
                 }
             } catch (error: Throwable) {
                 // Do not call Python traceback.format_exc() here: this is a Kotlin catch
