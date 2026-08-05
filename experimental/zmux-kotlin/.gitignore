@@ -4,3 +4,6 @@ local.properties
 *.iml
 .idea/
 captures/
+__pycache__/
+*.py[cod]
+error.log

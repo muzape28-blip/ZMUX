@@ -1,12 +1,7 @@
 package com.zmux.terminal
 
-import android.content.BroadcastReceiver
-import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
 import android.os.Bundle
 import android.view.ViewGroup
-import android.view.inputmethod.InputMethodManager
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -21,6 +16,7 @@ import com.termux.view.TerminalView
 import com.zmux.terminal.widget.KeyCapView
 import com.zmux.terminal.widget.SessionTabView
 import com.zmux.terminal.widget.StatusPillView
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Native Kotlin terminal for ZMUX, styled as **ZMUX Ember** (see [ZmuxTheme]).
@@ -39,10 +35,42 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
 
     private val sessions = mutableListOf<ZmuxTerminalSession>()
     private var activeSessionIndex = 0
-    private var sessionCounter = 1
-
     private var ctrlKeyCap: KeyCapView? = null
 
+    /** One rootfs operation at a time, even if terminal title sequences repeat. */
+    private val installInProgress = AtomicBoolean(false)
+
+    /**
+     * Chaquopy runs the installer on a worker thread. TerminalEmulator and
+     * TerminalView are UI objects, so every byte returned by Python must cross
+     * back to the main thread before it is appended or painted.
+     */
+    private fun appendToTerminal(session: ZmuxTerminalSession, bytes: ByteArray) {
+        runOnUiThread {
+            if (!isFinishing && !isDestroyed && sessions.contains(session)) {
+                session.feed(bytes)
+            }
+        }
+    }
+
+    private fun appendTerminalLine(session: ZmuxTerminalSession, text: String) {
+        appendToTerminal(session, ("\r\n$text\r\n").toByteArray(Charsets.UTF_8))
+    }
+
+    /** Render the real Java/Python exception, not traceback.format_exc() outside its context. */
+    private fun formatInstallFailure(error: Throwable): String {
+        val details = mutableListOf<String>()
+        var current: Throwable? = error
+        while (current != null && details.size < 4) {
+            val type = current.javaClass.simpleName.ifBlank { current.javaClass.name }
+            val message = current.message?.trim()?.takeIf { it.isNotEmpty() }
+            details += if (message == null) type else "$type: $message"
+            val next = current.cause
+            if (next === current) break
+            current = next
+        }
+        return details.distinct().joinToString("\nCaused by: ")
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -205,59 +233,82 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
 
     override fun onTitleChanged(changedSession: TerminalSession) {
         val title = changedSession.title ?: return
-        
-        if (title == "INSTALL_ALPINE" || title == "INSTALL_DEBIAN") {
-            val osName = if (title == "INSTALL_ALPINE") "alpine" else "debian"
-            val zmuxSession = sessions.find { it.session == changedSession } ?: return
-            
-            val esc = 27.toChar()
-            zmuxSession.feedLine("${esc}[34m[Chaquopy]${esc}[0m Bootstrapping Python Engine for $osName...")
-            
-            Thread {
-                try {
-                    val py = Python.getInstance()
-                    val sys = py.getModule("sys")
-                    val version = sys.get("version")?.toString()?.split(" ")?.get(0)
-                    
-                    zmuxSession.feedLine("${esc}[32m[Chaquopy]${esc}[0m Python $version engine activated!")
-                    zmuxSession.feedLine("${esc}[32m[Chaquopy]${esc}[0m Downloading rootfs (this may take a moment)...")
-                    
-                    val linuxenv = py.getModule("zmux.linuxenv")
-                    
-                    // We pass a standard Java object that implements __call__ so Chaquopy can invoke it as a Python function.
-                    // PyObject cannot be sub-classed directly. 
-                    val progressCallback = object {
-                        @Suppress("unused")
-                        fun invoke(msg: String) {
-                            zmuxSession.feed(msg.toByteArray(Charsets.UTF_8))
-                        }
-                    }
-
-                    // Call install using Chaquopy's direct attribute invocation
-                    // Chaquopy handles generic Java objects automatically
-                    linuxenv.callAttr("install", progressCallback, osName)
-                    linuxenv.callAttr("install_guest_wrappers")
-                    
-                    zmuxSession.feedLine("${esc}[32m[Chaquopy]${esc}[0m Install completed successfully!")
-                    
-                    val proot = linuxenv.callAttr("proot_binary")
-                    if (proot == null) {
-                        zmuxSession.feedLine("${esc}[31m[Chaquopy Error]${esc}[0m libproot.so not found. Alpine is extracted, but PRoot C++ build is missing.")
-                    } else {
-                        zmuxSession.feedLine("${esc}[32m[Chaquopy]${esc}[0m PRoot binary found at $proot")
-                        zmuxSession.feedLine("${esc}[33m[Chaquopy]${esc}[0m Ready for PRoot execution in Phase 3.")
-                    }
-                } catch (e: Exception) {
-                    val traceback = Python.getInstance().getModule("traceback")
-                    val trace = traceback.callAttr("format_exc").toString()
-                    zmuxSession.feedLine("${esc}[31m[Chaquopy Error]${esc}[0m \r\n$trace")
-                } finally {
-                    try {
-                        java.io.File(this@ZmuxTerminalActivity.filesDir, ".setup_done").createNewFile()
-                    } catch (ignored: Exception) {}
-                }
-            }.start()
+        val osName = when (title) {
+            "INSTALL_ALPINE" -> "alpine"
+            "INSTALL_DEBIAN" -> "debian"
+            else -> return
         }
+        val zmuxSession = sessions.find { it.session == changedSession } ?: return
+
+        if (!installInProgress.compareAndSet(false, true)) {
+            appendTerminalLine(zmuxSession, "\u001b[33m[Chaquopy]\u001b[0m Linux setup is already running. Please wait.")
+            return
+        }
+
+        val esc = 27.toChar()
+        appendTerminalLine(zmuxSession, "${esc}[34m[Chaquopy]${esc}[0m Starting verified $osName rootfs setup…")
+
+        Thread {
+            try {
+                val py = Python.getInstance()
+                val version = py.getModule("sys").get("version")
+                    ?.toString()?.substringBefore(" ") ?: "unknown"
+                appendTerminalLine(zmuxSession, "${esc}[32m[Chaquopy]${esc}[0m Python $version engine activated!")
+                appendTerminalLine(zmuxSession, "${esc}[32m[Chaquopy]${esc}[0m Downloading and verifying rootfs…")
+
+                val progressCallback = object : TerminalSessionHelper.ProgressCallback {
+                    override fun invoke(message: String) {
+                        // Chaquopy 15 exposes this as a Java object. linuxenv._emit_progress
+                        // calls its explicit invoke method rather than treating it as a
+                        // Python callable, and this helper moves the UI work to main.
+                        appendToTerminal(zmuxSession, message.toByteArray(Charsets.UTF_8))
+                    }
+                }
+
+                val linuxenv = py.getModule("zmux.linuxenv")
+                linuxenv.callAttr("install", progressCallback, osName)
+                linuxenv.callAttr("install_guest_wrappers")
+
+                // PyObject.get("key") is Python attribute access, not dict
+                // item access. Ask the module directly so the success banner
+                // reports the real installed guest/version on every Chaquopy release.
+                val installedOs = linuxenv.callAttr("installed_os").toString().ifBlank { osName }
+                val versionText = linuxenv.callAttr("installed_version").toString()
+                    .takeIf { it.isNotBlank() }
+                val suffix = if (versionText == null) "" else " ($versionText)"
+                appendTerminalLine(
+                    zmuxSession,
+                    "${esc}[32m[Chaquopy]${esc}[0m $installedOs$suffix rootfs installed and verified successfully!"
+                )
+
+                val proot = linuxenv.callAttr("proot_binary")?.toString()
+                if (proot.isNullOrBlank() || proot == "None") {
+                    appendTerminalLine(
+                        zmuxSession,
+                        "${esc}[33m[Chaquopy]${esc}[0m Rootfs is ready, but this APK has no packaged PRoot binary yet. " +
+                            "Install the APK build containing libproot.so to launch the Linux shell."
+                    )
+                } else {
+                    appendTerminalLine(zmuxSession, "${esc}[32m[Chaquopy]${esc}[0m PRoot binary verified at $proot")
+                }
+            } catch (error: Throwable) {
+                // Do not call Python traceback.format_exc() here: this is a Kotlin catch
+                // block, so Python has no active exception and returns "NoneType: None".
+                appendTerminalLine(
+                    zmuxSession,
+                    "${esc}[31m[Chaquopy Error]${esc}[0m\r\n${formatInstallFailure(error)}"
+                )
+            } finally {
+                try {
+                    // The host shell waits for this marker. Always release it after a
+                    // success or a genuine diagnostic so a corrected retry is possible.
+                    java.io.File(this@ZmuxTerminalActivity.filesDir, ".setup_done").createNewFile()
+                } catch (_: Exception) {
+                    // A closing activity may have removed the app directory.
+                }
+                installInProgress.set(false)
+            }
+        }.start()
     }
     override fun onSessionFinished(finishedSession: TerminalSession) = Unit
     override fun onCopyTextToClipboard(session: TerminalSession, text: String?) = Unit

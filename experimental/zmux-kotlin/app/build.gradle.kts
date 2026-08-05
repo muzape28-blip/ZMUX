@@ -68,6 +68,12 @@ tasks.named("preBuild") {
 chaquopy {
     defaultConfig {
         version = "3.11"
+        // Android's Python runtime doesn't reliably expose the device CA store.
+        // linuxenv downloads only through a certificate-verifying context backed
+        // by this bundled CA set; never fall back to unverified TLS.
+        pip {
+            install("certifi==2025.8.3")
+        }
     }
 }
 

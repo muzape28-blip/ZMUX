@@ -1,4 +1,4 @@
-"""ZMUX Alpine Linux environment — a proot-based userspace Linux sandbox.
+"""ZMUX Linux environment — a PRoot-based userspace Linux sandbox.
 
 Why this exists
 ---------------
@@ -73,6 +73,24 @@ ALPINE_SHA512 = {
               "b437bcf60be2ee7ced261870a736e4831bc55924f73b23756283ecfb29b",
 }
 
+# Debian is intentionally pinned rather than fetched from a moving "latest"
+# endpoint. These files and SHA-256 values come from Termux proot-distro's
+# own Debian plug-in at tag v4.7.0. The earlier implementation pointed at a
+# nonexistent v4.0.0 asset, skipped checksum verification, and selected an
+# AArch64 archive on x86_64 hosts. That made the Debian choice fail even after
+# the Chaquopy callback issue was fixed.
+DEBIAN_RELEASE = "bookworm"
+DEBIAN_PROOT_DISTRO_RELEASE = "v4.7.0"
+DEBIAN_SHA256 = {
+    "aarch64": "4baa32280cc70b67e2c650777c1d974349f0cdf23afaabc305ad3bc6182b8df8",
+    "arm": "0eba2cb93261d6e73c2f3c32ed7ebe9de408ceef584c5e0c0b7e237d294f7a8d",
+    "i686": "7425f5fe7f34c718428f235b9155adb782c29ce6347f704f4a93a9da195b9aa3",
+    "x86_64": "164932ab77a0b94a8e355c9b68158a5b76d5abef89ada509488c44ff54655d61",
+}
+
+ROOTFS_OS_MARKER = ".zmux-rootfs"
+SUPPORTED_ROOTFS = frozenset(("alpine", "debian"))
+
 #: Guest PATH handed to processes inside the sandbox. The child env is built
 #: by zmux.env for Android binaries; inside proot it must be Alpine's PATH or
 #: `git`/`apk`/`sh` will not resolve.
@@ -138,26 +156,64 @@ def rootfs_dir() -> Path:
     return _ROOTFS_DIR
 
 
+def _normalise_os_name(os_name: str) -> str:
+    value = str(os_name or "").strip().lower()
+    if value not in SUPPORTED_ROOTFS:
+        choices = ", ".join(sorted(SUPPORTED_ROOTFS))
+        raise ValueError(f"unsupported Linux environment {os_name!r}; choose one of: {choices}")
+    return value
+
+
+def installed_os() -> str:
+    """Return the installed guest name, or ``""`` when no complete rootfs exists.
+
+    Debian minbase does not ship ``/bin/busybox``. Checking for that Alpine-only
+    file meant a successfully extracted Debian filesystem was always reported
+    as not installed. New installs receive an explicit marker; the two release
+    files retain compatibility with rootfs directories made by older builds.
+    """
+    root = rootfs_dir()
+    if not (root / "bin" / "sh").is_file():
+        return ""
+    try:
+        marker = (root / "etc" / ROOTFS_OS_MARKER).read_text("utf-8").strip().lower()
+        if marker in SUPPORTED_ROOTFS:
+            return marker
+    except OSError:
+        pass
+    if (root / "etc" / "alpine-release").is_file():
+        return "alpine"
+    if (root / "etc" / "debian_version").is_file():
+        return "debian"
+    return ""
+
+
 def is_installed() -> bool:
-    return (rootfs_dir() / "bin" / "busybox").is_file() and (
-        (rootfs_dir() / "etc" / "alpine-release").is_file() or
-        (rootfs_dir() / "etc" / "debian_version").is_file()
-    )
+    return bool(installed_os())
 
 
 def installed_version() -> str:
+    root = rootfs_dir()
+    os_name = installed_os()
+    version_file = {
+        "alpine": root / "etc" / "alpine-release",
+        "debian": root / "etc" / "debian_version",
+    }.get(os_name)
+    if version_file is None:
+        return ""
     try:
-        return (rootfs_dir() / "etc" / "alpine-release").read_text("utf-8").strip()
+        return version_file.read_text("utf-8").strip()
     except OSError:
         return ""
 
 
 def status() -> str:
-    if not is_installed():
-        return "Alpine Linux environment: NOT INSTALLED (run `linux-setup`)"
+    os_name = installed_os()
+    if not os_name:
+        return "Linux environment: NOT INSTALLED (run `linux-setup`)"
     proot = proot_binary()
     proot_state = "ok" if proot else "missing libproot.so in nativeLibraryDir"
-    return (f"Alpine {installed_version()} ({alpine_arch()}) @ {rootfs_dir()}\n"
+    return (f"{os_name.capitalize()} {installed_version()} ({alpine_arch()}) @ {rootfs_dir()}\n"
             f"proot: {proot_state}")
 
 
@@ -514,48 +570,126 @@ def install_guest_wrappers() -> int:
 
 
 # ---------------------------------------------------------------------------
-# Installation (download -> sha512 verify -> safe extract -> bootstrap)
+# Installation (download -> verified digest -> safe extract -> bootstrap)
 # ---------------------------------------------------------------------------
-def _download_url(os_name: str = "alpine") -> tuple[str, str]:
+def _rootfs_spec(os_name: str) -> dict[str, object]:
+    """Return the immutable, verified source description for one guest OS."""
+    os_name = _normalise_os_name(os_name)
     arch = alpine_arch()
-    if os_name == "debian":
-        # Debian rootfs specifically designed for PRoot on Android via Termux's proot-distro
-        deb_arch = "aarch64" if arch in ("aarch64", "x86_64") else "arm"
-        # proot-distro uses xz format which Python tarfile fully supports via lzma module natively
-        url = f"https://github.com/termux/proot-distro/releases/download/v4.0.0/debian-{deb_arch}-pd-v4.0.0.tar.xz"
-        return url, ""
-        
-    expected = ALPINE_SHA512.get(arch)
-    if not expected:
-        raise RuntimeError(f"No pinned Alpine rootfs for architecture {arch!r}")
-    return (f"{ALPINE_MIRROR}/{ALPINE_BRANCH}/releases/{arch}/"
-            f"alpine-minirootfs-{ALPINE_VERSION}-{arch}.tar.gz"), expected
+    if os_name == "alpine":
+        expected = ALPINE_SHA512.get(arch)
+        if not expected:
+            raise RuntimeError(f"No pinned Alpine rootfs for architecture {arch!r}")
+        return {
+            "os_name": os_name,
+            "label": f"Alpine {ALPINE_VERSION}",
+            "url": (f"{ALPINE_MIRROR}/{ALPINE_BRANCH}/releases/{arch}/"
+                    f"alpine-minirootfs-{ALPINE_VERSION}-{arch}.tar.gz"),
+            "checksum_name": "sha512",
+            "checksum": expected,
+            "extension": "tar.gz",
+            "strip_components": 0,
+        }
+
+    # The proot-distro archive deliberately contains a single top-level
+    # directory (e.g. debian-bookworm-aarch64). It is stripped after the safe
+    # extraction below, so /bin/sh ends up directly in our rootfs directory.
+    debian_arch = {"aarch64": "aarch64", "armv7": "arm", "x86_64": "x86_64"}.get(arch)
+    expected = DEBIAN_SHA256.get(debian_arch or "")
+    if not debian_arch or not expected:
+        raise RuntimeError(f"No pinned Debian rootfs for architecture {arch!r}")
+    filename = (
+        f"debian-{DEBIAN_RELEASE}-{debian_arch}-pd-"
+        f"{DEBIAN_PROOT_DISTRO_RELEASE}.tar.xz"
+    )
+    return {
+        "os_name": os_name,
+        "label": f"Debian {DEBIAN_RELEASE}",
+        "url": ("https://github.com/termux/proot-distro/releases/download/"
+                f"{DEBIAN_PROOT_DISTRO_RELEASE}/{filename}"),
+        "checksum_name": "sha256",
+        "checksum": expected,
+        "extension": "tar.xz",
+        "strip_components": 1,
+    }
+
+
+def _download_url(os_name: str = "alpine") -> tuple[str, str]:
+    """Compatibility accessor for callers which only need URL and digest."""
+    spec = _rootfs_spec(os_name)
+    return str(spec["url"]), str(spec["checksum"])
+
+
+def _emit_progress(callback, text: str) -> None:
+    """Send terminal progress to Python callbacks *and* Chaquopy Java objects.
+
+    Chaquopy 15 exposes a Kotlin object as a Java object, not a Python-callable
+    function. The old code unconditionally did ``progress(text)`` and failed
+    immediately with ``TypeError: ... object is not callable``. The Android
+    activity then asked Python for a traceback outside an exception context,
+    which is why the device only displayed the useless ``NoneType: None``.
+
+    A disconnected activity must not turn an otherwise valid rootfs install
+    into a failed one, so errors while rendering progress are deliberately
+    ignored. The installer itself still raises download/verification/extraction
+    failures normally.
+    """
+    if callback is None:
+        return
+    payload = text.replace("\n", "\r\n")
+    try:
+        if callable(callback):
+            callback(payload)
+            return
+        # ``invoke`` is the explicit Java interface used by the Android UI.
+        # accept/onProgress make this helper convenient for other Java bridges.
+        for name in ("invoke", "accept", "onProgress"):
+            method = getattr(callback, name, None)
+            if callable(method):
+                method(payload)
+                return
+    except Exception:
+        return
 
 
 def install(progress=None, os_name="alpine") -> dict:
-    """Download, verify and install the rootfs. Idempotent."""
-    if is_installed():
-        return {"ok": True, "already": True, "version": installed_version(),
-                "path": str(rootfs_dir())}
-    url, expected = _download_url(os_name)
+    """Download, verify and atomically install the selected Linux rootfs.
+
+    A selection replaces a different already-installed guest only after the
+    new filesystem has been fully downloaded, verified and staged. The shared
+    user home remains outside the rootfs and is therefore preserved.
+    """
+    spec = _rootfs_spec(str(os_name))
+    selected = str(spec["os_name"])
+    current = installed_os()
+    if current == selected:
+        return {
+            "ok": True,
+            "already": True,
+            "os": current,
+            "version": installed_version(),
+            "path": str(rootfs_dir()),
+        }
+
+    def report(text: str) -> None:
+        _emit_progress(progress if progress is not None else progress_sink, text)
+
+    if current:
+        report(f"Replacing installed {current.capitalize()} environment safely…\n")
+
     arch = alpine_arch()
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    
-    ext = "tar.xz" if os_name == "debian" else "tar.gz"
-    tarball = CACHE_DIR / f"{os_name}-rootfs-{arch}.{ext}"
+    tarball = CACHE_DIR / f"{selected}-rootfs-{arch}.{spec['extension']}"
+    report(f"Downloading {spec['label']} rootfs ({arch})…\n")
 
-    def _report(text: str) -> None:
-        if progress is not None:
-            progress(text.replace("\n", "\r\n"))
-        elif progress_sink is not None:
-            progress_sink(text.replace("\n", "\r\n"))
-
-    _report(f"Downloading {os_name.capitalize()} rootfs ({arch})…\n")
-    digest, total = _hashlib_sha512(), 0
+    import hashlib
+    checksum_name = str(spec["checksum_name"])
+    digest = hashlib.new(checksum_name)
+    total = 0
     started = time.monotonic()
     last = 0.0
     request = urllib.request.Request(
-        url, headers={"User-Agent": f"ZMUX/{APP_VERSION}"}
+        str(spec["url"]), headers={"User-Agent": f"ZMUX/{APP_VERSION}"}
     )
     try:
         with urllib.request.urlopen(request, timeout=120, context=get_ssl_context()) as response:
@@ -572,24 +706,23 @@ def install(progress=None, os_name="alpine") -> dict:
                         raise RuntimeError("rootfs tarball exceeds safety limit")
                     digest.update(chunk)
                     output.write(chunk)
-                    if progress is not None and time.monotonic() - last >= 0.15:
-                        _report(f"  {total / 1048576:5.1f} MiB "
-                                f"({total / max(time.monotonic() - started, 1e-6) / 1024:5.1f} KiB/s)\r")
+                    if time.monotonic() - last >= 0.15:
+                        report(f"  {total / 1048576:5.1f} MiB "
+                               f"({total / max(time.monotonic() - started, 1e-6) / 1024:5.1f} KiB/s)\r")
                         last = time.monotonic()
     except Exception as error:
         tarball.unlink(missing_ok=True)
         raise RuntimeError(f"download failed: {error}") from error
 
-    if expected:
-        actual = digest.hexdigest()
-        if actual != expected:
-            tarball.unlink(missing_ok=True)
-            raise RuntimeError(
-                f"SHA-512 mismatch for rootfs:\n  expected {expected}\n  actual   {actual}"
-            )
-        _report("  checksum verified ✓\n")
-    else:
-        _report("  download completed ✓\n")
+    actual = digest.hexdigest()
+    expected = str(spec["checksum"])
+    if actual.lower() != expected.lower():
+        tarball.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"{checksum_name.upper()} mismatch for {selected} rootfs:\n"
+            f"  expected {expected}\n  actual   {actual}"
+        )
+    report(f"  {checksum_name.upper()} checksum verified ✓\n")
 
     _ROOTFS_DIR.parent.mkdir(parents=True, exist_ok=True)
     staging = _STAGING_DIR
@@ -597,8 +730,8 @@ def install(progress=None, os_name="alpine") -> dict:
         shutil.rmtree(staging, ignore_errors=True)
     staging.mkdir(parents=True)
     try:
-        _safe_extract(tarball, staging)
-        _bootstrap(staging)
+        _safe_extract(tarball, staging, int(spec["strip_components"]))
+        _bootstrap(staging, selected)
         # Atomic swap: never leave a half-installed rootfs at the live path.
         if rootfs_dir().exists():
             shutil.rmtree(rootfs_dir(), ignore_errors=True)
@@ -606,79 +739,114 @@ def install(progress=None, os_name="alpine") -> dict:
     finally:
         tarball.unlink(missing_ok=True)
         shutil.rmtree(staging, ignore_errors=True)
-    return {"ok": True, "already": False, "version": installed_version(),
-            "path": str(rootfs_dir())}
+    return {
+        "ok": True,
+        "already": False,
+        "os": selected,
+        "version": installed_version(),
+        "path": str(rootfs_dir()),
+    }
 
 
-def _hashlib_sha512():
-    import hashlib
-    return hashlib.sha512()
-
-
-def _safe_extract(tarball: Path, target: Path) -> None:
-    """Extract the minirootfs with path-traversal protection."""
+def _safe_extract(tarball: Path, target: Path, strip_components: int = 0) -> None:
+    """Extract a verified rootfs with traversal checks and optional top-dir strip."""
     mode = "r:xz" if tarball.name.endswith(".xz") else "r:gz"
-    
-    # Import lzma dynamically to catch if it's missing in some python distributions
     if mode == "r:xz":
         try:
-            import lzma
-        except ImportError:
-            raise RuntimeError("Debian installation failed: The 'lzma' python module is missing in this build. Please select Alpine.")
+            import lzma  # noqa: F401 - force a clear diagnostic before opening.
+        except ImportError as error:
+            raise RuntimeError(
+                "Debian installation requires Python's lzma module, which is missing "
+                "from this APK build. Reinstall an APK built with Chaquopy lzma support."
+            ) from error
 
     with tarfile.open(tarball, mode) as archive:
         members = []
+        roots: set[str] = set()
         total = 0
         for member in archive.getmembers():
             name = member.name
-            if name.startswith("/") or ".." in Path(name).parts:
+            parts = tuple(part for part in Path(name).parts if part not in ("", "."))
+            if name.startswith("/") or not parts or ".." in parts:
                 raise RuntimeError(f"unsafe archive member: {name!r}")
+            if strip_components:
+                if len(parts) <= strip_components:
+                    # The top-level directory entry itself is expected; all
+                    # useful members must have at least one remaining segment.
+                    if member.isdir() and len(parts) == strip_components:
+                        roots.add(parts[0])
+                        members.append(member)
+                        continue
+                    raise RuntimeError(f"rootfs member has no path after strip: {name!r}")
+                roots.add(parts[0])
             if member.isfile():
                 total += member.size
                 if total > MAX_ROOTFS_BYTES:
                     raise RuntimeError("uncompressed rootfs exceeds safety limit")
             members.append(member)
-        # Python 3.14 changed the extractall() default filter to "data",
-        # which refuses absolute symlink targets — and a busybox-style
-        # minirootfs is full of them (usr/bin/yes -> /bin/busybox, ~306
-        # links), so `linux-setup` died on-device with "is a link to an
-        # absolute path" while desktop CI (3.11, default None) passed.
-        # "fully_trusted" is the honest filter here: member *names* are
-        # already validated above (no absolute names, no "..", size cap)
-        # and the archive itself is SHA-512-pinned to Alpine's official
-        # digest, i.e. fully trusted content by construction.
+
+        if strip_components and len(roots) != 1:
+            raise RuntimeError("rootfs archive must contain exactly one top-level directory")
+        root_prefix = next(iter(roots), "")
+
+        # Python 3.14 changed extractall's default filter to "data", which
+        # rejects the absolute symlink targets used by normal Linux rootfses.
+        # Names and archive digest were validated above, so fully_trusted is
+        # appropriate here. Keep the TypeError fallback for Python 3.11.
         try:
             archive.extractall(target, members=members, filter="fully_trusted")
         except TypeError:
-            # Python < 3.12 (and early patch levels) has no filter kwarg.
             archive.extractall(target, members=members)
 
+    if strip_components:
+        payload = target / root_prefix
+        if not payload.is_dir():
+            raise RuntimeError(f"rootfs top-level directory missing after extraction: {root_prefix!r}")
+        for child in payload.iterdir():
+            destination = target / child.name
+            if destination.exists():
+                raise RuntimeError(f"rootfs archive conflicts with extraction target: {child.name!r}")
+            os.replace(child, destination)
+        payload.rmdir()
 
-def _bootstrap(root: Path) -> None:
-    """First-run files every Alpine guest needs to be useful."""
-    apk = root / "etc" / "apk"
-    apk.mkdir(parents=True, exist_ok=True)
-    (apk / "repositories").write_text(
-        f"{ALPINE_MIRROR}/{ALPINE_BRANCH}/main\n"
-        f"{ALPINE_MIRROR}/{ALPINE_BRANCH}/community\n",
-        encoding="utf-8",
-    )
+
+def _bootstrap(root: Path, os_name: str) -> None:
+    """Write OS-specific first-run configuration and a durable OS marker."""
+    os_name = _normalise_os_name(os_name)
+    if not (root / "bin" / "sh").is_file():
+        raise RuntimeError("rootfs is missing /bin/sh after extraction")
+
+    etc = root / "etc"
+    etc.mkdir(parents=True, exist_ok=True)
+    if os_name == "alpine":
+        apk = etc / "apk"
+        apk.mkdir(parents=True, exist_ok=True)
+        (apk / "repositories").write_text(
+            f"{ALPINE_MIRROR}/{ALPINE_BRANCH}/main\n"
+            f"{ALPINE_MIRROR}/{ALPINE_BRANCH}/community\n",
+            encoding="utf-8",
+        )
+        # The official minirootfs normally contains this marker, but retain a
+        # fallback for interrupted/cross-version upgrades.
+        release = etc / "alpine-release"
+        if not release.is_file():
+            release.write_text(f"{ALPINE_VERSION}\n", encoding="utf-8")
+    elif not (etc / "debian_version").is_file():
+        raise RuntimeError("Debian rootfs is missing /etc/debian_version after extraction")
+
     # DNS: prefer the host's resolv.conf; fall back to public resolvers.
     host_resolv = Path("/etc/resolv.conf")
     if host_resolv.is_file():
         try:
             content = host_resolv.read_text("utf-8", errors="replace")
             if content.strip():
-                (root / "etc" / "resolv.conf").write_text(content, encoding="utf-8")
+                (etc / "resolv.conf").write_text(content, encoding="utf-8")
         except OSError:
             pass
-    resolv = root / "etc" / "resolv.conf"
+    resolv = etc / "resolv.conf"
     if not resolv.is_file():
         resolv.write_text("nameserver 8.8.8.8\nnameserver 1.1.1.1\n", encoding="utf-8")
-    # Mark the version so `installed_version()` works even mid-upgrade.
-    (root / "etc" / "alpine-release").write_text(
-        f"{ALPINE_VERSION}\n", encoding="utf-8"
-    ) if not (root / "etc" / "alpine-release").is_file() else None
+    (etc / ROOTFS_OS_MARKER).write_text(f"{os_name}\n", encoding="utf-8")
 
 
 def uninstall() -> dict:
@@ -775,24 +943,25 @@ def run_gates(report=None) -> dict:
     else:
         gate("proot-exec", False, "libproot.so not found/executable")
 
-    # G3 — Alpine rootfs boots inside proot.
-    if proot and is_installed():
+    # G3 — the selected Linux rootfs boots inside proot.
+    guest_name = installed_os()
+    if proot and guest_name:
         try:
+            version_path = "/etc/alpine-release" if guest_name == "alpine" else "/etc/debian_version"
             line = build_command_line(["/bin/sh", "-c",
-                                       "echo zmux-alpine-ok; cat /etc/alpine-release"],
-                                      HOME_DIR)
+                                       f"echo zmux-linux-ok; cat {version_path}"], HOME_DIR)
             env = dict(os.environ)
             env.update(proot_env())
             result = subprocess.run(line, shell=True, capture_output=True,
                                     text=True, timeout=60, env=env)
-            ok = result.returncode == 0 and "zmux-alpine-ok" in (result.stdout or "")
-            gate("alpine-boot", ok,
-                 f"Alpine {installed_version()} boots in proot "
+            ok = result.returncode == 0 and "zmux-linux-ok" in (result.stdout or "")
+            gate("linux-boot", ok,
+                 f"{guest_name.capitalize()} {installed_version()} boots in proot "
                  f"(exit={result.returncode}, out={result.stdout.strip()!r})")
         except Exception as error:
-            gate("alpine-boot", False, f"boot failed: {error}")
+            gate("linux-boot", False, f"boot failed: {error}")
     else:
-        gate("alpine-boot", False,
+        gate("linux-boot", False,
              "rootfs not installed or proot missing (run `linux-setup` first)")
 
     # G4 — real `git clone` over HTTPS inside the sandbox. The target lives
@@ -823,21 +992,23 @@ def run_gates(report=None) -> dict:
     else:
         gate("git-clone", False, "skipped: proot/rootfs unavailable")
 
-    # G5 — apk tooling present inside the guest (binary level; network update
-    # is environment-dependent and reported as INFO, not a gate failure).
-    if proot and is_installed():
+    # G5 — the selected guest's package manager is present. Network update is
+    # environment-dependent and intentionally not part of this binary-level gate.
+    if proot and guest_name:
+        package_tool = ["/sbin/apk", "--version"] if guest_name == "alpine" else ["/usr/bin/apt-get", "--version"]
+        gate_name = "apk" if guest_name == "alpine" else "apt"
         try:
-            line = build_command_line(["/sbin/apk", "--version"], HOME_DIR)
+            line = build_command_line(package_tool, HOME_DIR)
             env = dict(os.environ)
             env.update(proot_env())
             result = subprocess.run(line, shell=True, capture_output=True,
                                     text=True, timeout=60, env=env)
-            gate("apk", result.returncode == 0,
+            gate(gate_name, result.returncode == 0,
                  (result.stdout or result.stderr).strip())
         except Exception as error:
-            gate("apk", False, f"apk check failed: {error}")
+            gate(gate_name, False, f"{gate_name} check failed: {error}")
     else:
-        gate("apk", False, "skipped: proot/rootfs unavailable")
+        gate("package-manager", False, "skipped: proot/rootfs unavailable")
 
     report_line("")
     passed = sum(1 for r in results.values() if r["ok"])
