@@ -4,51 +4,6 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 
 public class TerminalSessionHelper {
-    public static void injectEmulator(TerminalSession session, TerminalEmulator emulator) {
-        try {
-            Field emulatorField = TerminalSession.class.getDeclaredField("mEmulator");
-            emulatorField.setAccessible(true);
-            emulatorField.set(session, emulator);
-
-            Field pidField = TerminalSession.class.getDeclaredField("mShellPid");
-            pidField.setAccessible(true);
-            pidField.set(session, 1);
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-    }
-    
-    public static int readQueue(TerminalSession session, byte[] buffer, boolean block) {
-        try {
-            Field queueField = TerminalSession.class.getDeclaredField("mTerminalToProcessIOQueue");
-            queueField.setAccessible(true);
-            Object queue = queueField.get(session);
-            if (queue != null) {
-                Method readMethod = queue.getClass().getDeclaredMethod("read", byte[].class, boolean.class);
-                readMethod.setAccessible(true);
-                return (Integer) readMethod.invoke(queue, buffer, block);
-            }
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-        return -1;
-    }
-
-    public static void closeQueue(TerminalSession session) {
-        try {
-            Field queueField = TerminalSession.class.getDeclaredField("mTerminalToProcessIOQueue");
-            queueField.setAccessible(true);
-            Object queue = queueField.get(session);
-            if (queue != null) {
-                Method closeMethod = queue.getClass().getDeclaredMethod("close");
-                closeMethod.setAccessible(true);
-                closeMethod.invoke(queue);
-            }
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-    }
-
     public static TerminalSession createLocalSession(TerminalSessionClient client, String filesDir) {
         java.io.File dir = new java.io.File(filesDir);
         if (!dir.exists()) {
@@ -66,6 +21,12 @@ public class TerminalSessionHelper {
             // Shell bawaan Android (mksh) butuh karakter escape beneran, bukan string "\033".
             // Biar gampang dan pasti jalan, kita pake prompt bersih atau inject char escape.
             char esc = (char) 27;
+            fw.write("clear; printf \"\\033[3J\"\n");
+            fw.write("echo '" + esc + "[33m=================================================" + esc + "[0m'\n");
+            fw.write("echo '" + esc + "[32mWELCOME TO ZMUX, FEEL FREE TO EXEC COMMAND..." + esc + "[0m'\n");
+            fw.write("echo ''\n");
+            fw.write("echo '(Type " + esc + "[34mlinux-setup" + esc + "[0m to install Alpine or Debian)'\n");
+            fw.write("echo '" + esc + "[33m=================================================" + esc + "[0m'\n");
             fw.write("export PS1='" + esc + "[32mzmux" + esc + "[0m~" + esc + "[34m:" + esc + "[0m$ '\n");
             fw.write("alias ls='ls --color=auto'\n");
             fw.write("alias clear='clear; printf \"\\033[3J\"'\n");
@@ -114,7 +75,7 @@ public class TerminalSessionHelper {
         };
         return new TerminalSession("/system/bin/sh", filesDir, new String[0], env, 2000, client);
     }
-    
+
     public static TerminalEmulator getEmulator(TerminalSession session) {
         try {
             Field f = TerminalSession.class.getDeclaredField("mEmulator");

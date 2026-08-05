@@ -14,6 +14,7 @@ import androidx.appcompat.app.AppCompatActivity
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
 import com.termux.terminal.ZmuxTerminalSession
+import com.termux.terminal.TerminalSessionHelper
 import com.chaquo.python.Python
 import com.chaquo.python.android.AndroidPlatform
 import com.termux.view.TerminalView
@@ -57,12 +58,30 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
                     val version = sys.get("version")?.toString()?.split(" ")?.get(0)
                     
                     currentSession.feedLine("${esc}[32m[Chaquopy]${esc}[0m Python $version engine activated!")
+                    currentSession.feedLine("${esc}[32m[Chaquopy]${esc}[0m Downloading rootfs (this may take a moment)...")
                     
                     val linuxenv = py.getModule("zmux.linuxenv")
-                    currentSession.feedLine("${esc}[32m[Chaquopy]${esc}[0m ZMUX Backend loaded: ${linuxenv}")
-                    currentSession.feedLine("${esc}[33m[Chaquopy]${esc}[0m Execution of PRoot is deferred to final integration phase.")
+                    
+                    // Call install using Chaquopy's direct attribute invocation
+                    linuxenv.callAttr("install")
+                    linuxenv.callAttr("install_guest_wrappers")
+                    
+                    currentSession.feedLine("${esc}[32m[Chaquopy]${esc}[0m Install completed successfully!")
+                    
+                    val proot = linuxenv.callAttr("proot_binary")
+                    if (proot == null) {
+                        currentSession.feedLine("${esc}[31m[Chaquopy Error]${esc}[0m libproot.so not found. Alpine is extracted, but PRoot C++ build is missing.")
+                        currentSession.feedLine("${esc}[33m[Chaquopy]${esc}[0m Press ENTER to continue in local shell.")
+                    } else {
+                        currentSession.feedLine("${esc}[32m[Chaquopy]${esc}[0m PRoot binary found at $proot")
+                        currentSession.feedLine("${esc}[33m[Chaquopy]${esc}[0m Ready for PRoot execution in Phase 3.")
+                        currentSession.feedLine("${esc}[33m[Chaquopy]${esc}[0m Press ENTER to continue in local shell.")
+                    }
                 } catch (e: Exception) {
-                    currentSession.feedLine("${esc}[31m[Chaquopy Error]${esc}[0m ${e.message}")
+                    val traceback = Python.getInstance().getModule("traceback")
+                    val trace = traceback.callAttr("format_exc").toString()
+                    currentSession.feedLine("${esc}[31m[Chaquopy Error]${esc}[0m \r\n$trace")
+                    currentSession.feedLine("${esc}[33m[Chaquopy]${esc}[0m Press ENTER to continue in local shell.")
                 }
             }.start()
         }
@@ -120,20 +139,7 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
     }
 
     private fun createNewSession() {
-        val newSession = com.termux.terminal.ZmuxTerminalSession(this)
-        
-        // Sapaan / Welcome Message (Jujur dan No Mock)
-        val esc = 27.toChar()
-        
-        // Use standard \r\n explicitly so the terminal handles carriage return properly.
-        val welcome = "${esc}[33m=================================================${esc}[0m\r\n" +
-                      "${esc}[32mWELCOME TO ZMUX, FEEL FREE TO EXEC COMMAND...${esc}[0m\r\n" +
-                      "\r\n" +
-                      "(Type ${esc}[34mlinux-setup${esc}[0m to install Alpine or Debian)\r\n" +
-                      "${esc}[33m=================================================${esc}[0m\r\n"
-        
-        newSession.feed(welcome.toByteArray(Charsets.UTF_8))
-        
+        val newSession = ZmuxTerminalSession(this)
         sessions.add(newSession)
         switchToSession(sessions.size - 1)
     }
@@ -189,11 +195,11 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
                 HorizontalScrollView(this).apply {
                     isHorizontalScrollBarEnabled = false
                     addView(rowView)
-                },
-                LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                ),
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                    )
+                }
             )
         }
     }
@@ -234,10 +240,6 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
         activeSession()?.session?.write(bytes, 0, bytes.size)
     }
 
-    private fun showKeyboard() {
-    }
-
-
     override fun onDestroy() {
         unregisterReceiver(installReceiver)
         for (s in sessions) {
@@ -249,7 +251,10 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
 
     // ------------------------------------------------------- TerminalSessionClient
     override fun onTextChanged(changedSession: TerminalSession) {
-        if (::terminalView.isInitialized) terminalView.onScreenUpdated()
+        if (::terminalView.isInitialized) {
+            terminalView.onScreenUpdated()
+            ZmuxTheme.applyTo(TerminalSessionHelper.getEmulator(changedSession))
+        }
     }
 
     override fun onTitleChanged(changedSession: TerminalSession) = Unit
