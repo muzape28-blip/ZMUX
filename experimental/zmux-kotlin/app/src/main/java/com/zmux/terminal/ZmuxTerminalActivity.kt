@@ -76,20 +76,6 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
 
         buildVirtualKeys()
         
-        val filter = IntentFilter("com.zmux.terminal.INSTALL_OS")
-        @Suppress("UnspecifiedRegisterReceiverFlag")
-        try {
-            androidx.core.content.ContextCompat.registerReceiver(
-                this, installReceiver, filter, androidx.core.content.ContextCompat.RECEIVER_EXPORTED
-            )
-        } catch (e: Exception) {
-            try {
-                registerReceiver(installReceiver, filter)
-            } catch (e2: Exception) {
-                // Ignore fallback registration failures
-            }
-        }
-        
         // Auto-start in local shell mode by default so we bypass the login screen
         createNewSession()
     }
