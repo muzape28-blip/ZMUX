@@ -515,8 +515,15 @@ def install_guest_wrappers() -> int:
 # ---------------------------------------------------------------------------
 # Installation (download -> sha512 verify -> safe extract -> bootstrap)
 # ---------------------------------------------------------------------------
-def _download_url() -> str:
+def _download_url(os_name: str = "alpine") -> tuple[str, str]:
     arch = alpine_arch()
+    if os_name == "debian":
+        # Debian rootfs specifically designed for PRoot on Android via Termux's proot-distro
+        deb_arch = "aarch64" if arch in ("aarch64", "x86_64") else "arm"
+        # proot-distro uses xz format which Python tarfile fully supports via lzma module natively
+        url = f"https://github.com/termux/proot-distro/releases/download/v4.0.0/debian-{deb_arch}-pd-v4.0.0.tar.xz"
+        return url, ""
+        
     expected = ALPINE_SHA512.get(arch)
     if not expected:
         raise RuntimeError(f"No pinned Alpine rootfs for architecture {arch!r}")
@@ -524,15 +531,17 @@ def _download_url() -> str:
             f"alpine-minirootfs-{ALPINE_VERSION}-{arch}.tar.gz"), expected
 
 
-def install(progress=None) -> dict:
-    """Download, verify and install the Alpine rootfs. Idempotent."""
+def install(progress=None, os_name="alpine") -> dict:
+    """Download, verify and install the rootfs. Idempotent."""
     if is_installed():
         return {"ok": True, "already": True, "version": installed_version(),
                 "path": str(rootfs_dir())}
-    url, expected = _download_url()
+    url, expected = _download_url(os_name)
     arch = alpine_arch()
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    tarball = CACHE_DIR / f"alpine-minirootfs-{ALPINE_VERSION}-{arch}.tar.gz"
+    
+    ext = "tar.xz" if os_name == "debian" else "tar.gz"
+    tarball = CACHE_DIR / f"{os_name}-rootfs-{arch}.{ext}"
 
     def _report(text: str) -> None:
         if progress is not None:
@@ -540,7 +549,7 @@ def install(progress=None) -> dict:
         elif progress_sink is not None:
             progress_sink(text.replace("\n", "\r\n"))
 
-    _report(f"Downloading Alpine {ALPINE_VERSION} ({arch})…\n")
+    _report(f"Downloading {os_name.capitalize()} rootfs ({arch})…\n")
     digest, total = _hashlib_sha512(), 0
     started = time.monotonic()
     last = 0.0
@@ -570,13 +579,16 @@ def install(progress=None) -> dict:
         tarball.unlink(missing_ok=True)
         raise RuntimeError(f"download failed: {error}") from error
 
-    actual = digest.hexdigest()
-    if actual != expected:
-        tarball.unlink(missing_ok=True)
-        raise RuntimeError(
-            f"SHA-512 mismatch for Alpine rootfs:\n  expected {expected}\n  actual   {actual}"
-        )
-    _report("  checksum verified ✓\n")
+    if expected:
+        actual = digest.hexdigest()
+        if actual != expected:
+            tarball.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"SHA-512 mismatch for rootfs:\n  expected {expected}\n  actual   {actual}"
+            )
+        _report("  checksum verified ✓\n")
+    else:
+        _report("  download completed ✓\n")
 
     _ROOTFS_DIR.parent.mkdir(parents=True, exist_ok=True)
     staging = _STAGING_DIR
@@ -604,7 +616,8 @@ def _hashlib_sha512():
 
 def _safe_extract(tarball: Path, target: Path) -> None:
     """Extract the minirootfs with path-traversal protection."""
-    with tarfile.open(tarball, "r:gz") as archive:
+    mode = "r:xz" if tarball.name.endswith(".xz") else "r:gz"
+    with tarfile.open(tarball, mode) as archive:
         members = []
         total = 0
         for member in archive.getmembers():
