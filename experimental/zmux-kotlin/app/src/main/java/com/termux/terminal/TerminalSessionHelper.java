@@ -69,6 +69,8 @@ public class TerminalSessionHelper {
             fw.write("export PS1='" + esc + "[32mzmux" + esc + "[0m~" + esc + "[34m:" + esc + "[0m$ '\n");
             fw.write("alias ls='ls --color=auto'\n");
             fw.write("alias clear='clear; printf \"\\033[3J\"'\n");
+            // Bypass execution block by overriding the command via alias so it invokes `sh` directly
+            fw.write("alias linux-setup='sh " + binDir.getAbsolutePath() + "/linux-setup'\n");
             fw.close();
 
             java.io.File setup = new java.io.File(binDir, "linux-setup");
@@ -95,7 +97,12 @@ public class TerminalSessionHelper {
             fws.write("    echo 'Cancelled.'\n");
             fws.write("fi\n");
             fws.close();
-            setup.setExecutable(true);
+            
+            // Bypass Android 10+ W^X strict executable permissions on data files
+            // by relying on standard execution via 'sh' instead of direct execution.
+            // But we still attempt setExecutable for good measure.
+            setup.setExecutable(true, false);
+            setup.setReadable(true, false);
         } catch (Exception e) {
             e.printStackTrace();
         }
