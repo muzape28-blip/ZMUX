@@ -120,7 +120,7 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
     }
 
     private fun createNewSession() {
-        val newSession = com.termux.terminal.ZmuxTerminalSession(this, isLocalMode = true)
+        val newSession = com.termux.terminal.ZmuxTerminalSession(this)
         
         // Sapaan / Welcome Message (Jujur dan No Mock)
         val esc = 27.toChar()
