@@ -126,7 +126,11 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
                 this, installReceiver, filter, androidx.core.content.ContextCompat.RECEIVER_EXPORTED
             )
         } catch (e: Exception) {
-            registerReceiver(installReceiver, filter)
+            try {
+                registerReceiver(installReceiver, filter)
+            } catch (e2: Exception) {
+                // Ignore fallback registration failures
+            }
         }
         
         // Auto-start in local shell mode by default so we bypass the login screen
