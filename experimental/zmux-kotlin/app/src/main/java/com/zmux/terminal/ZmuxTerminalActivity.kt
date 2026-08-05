@@ -269,6 +269,10 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
                 }
 
                 val linuxenv = py.getModule("zmux.linuxenv")
+                // This is the authoritative location for libproot.so. The
+                // Python engine is Chaquopy (not Kivy/python-for-android), so
+                // its legacy activity discovery cannot infer this directory.
+                linuxenv.callAttr("set_native_library_dir", applicationInfo.nativeLibraryDir)
                 linuxenv.callAttr("install", progressCallback, osName)
                 linuxenv.callAttr("install_guest_wrappers")
 

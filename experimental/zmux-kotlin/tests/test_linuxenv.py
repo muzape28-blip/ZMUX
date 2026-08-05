@@ -146,6 +146,33 @@ class LinuxEnvInstallTests(unittest.TestCase):
         self.assertEqual(linuxenv.installed_version(), "12.9")
         self.assertTrue(linuxenv.is_installed())
 
+    def test_alpine_absolute_guest_sh_link_is_valid(self) -> None:
+        """Alpine uses /bin/sh -> /bin/busybox, not a host-side link."""
+        archive = self.root / "alpine-absolute-sh.tar.gz"
+        with tarfile.open(archive, "w:gz") as handle:
+            busybox = tarfile.TarInfo("bin/busybox")
+            busybox.size = len(b"busybox")
+            busybox.mode = 0o755
+            handle.addfile(busybox, io.BytesIO(b"busybox"))
+
+            shell = tarfile.TarInfo("bin/sh")
+            shell.type = tarfile.SYMTYPE
+            shell.linkname = "/bin/busybox"
+            handle.addfile(shell)
+
+            release = tarfile.TarInfo("etc/alpine-release")
+            release.size = len(b"3.22.5\n")
+            handle.addfile(release, io.BytesIO(b"3.22.5\n"))
+
+        staging = self.root / "alpine-staging"
+        staging.mkdir()
+        linuxenv._safe_extract(archive, staging)
+        self.assertTrue(linuxenv._guest_regular_file(staging, "/bin/sh"))
+        linuxenv._bootstrap(staging, "alpine")
+        staging.replace(linuxenv.rootfs_dir())
+        self.assertEqual(linuxenv.installed_os(), "alpine")
+        self.assertEqual(linuxenv.installed_version(), "3.22.5")
+
     def test_skips_root_metadata_and_android_forbidden_dev_nodes(self) -> None:
         """Real rootfs archives contain both of these entries on-device."""
         archive = self.root / "rootfs-with-dev.tar.gz"

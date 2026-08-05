@@ -40,6 +40,7 @@ import contextlib
 import os
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -122,6 +123,24 @@ _STAGING_DIR = APP_DIR / "linux" / ".staging"
 #: the exact name the linker asks for.
 _RUNTIME_LIB_DIR = Path(os.environ.get("ZMUX_RUNTIME_LIB_DIR", APP_DIR / "lib"))
 
+# The Kotlin host knows ApplicationInfo.nativeLibraryDir exactly. Chaquopy
+# isn't python-for-android, so the old Kivy/pyjnius discovery paths are often
+# unavailable; this value is supplied explicitly before setup/proot probing.
+_NATIVE_LIBRARY_DIR_OVERRIDE: str | None = os.environ.get("ZMUX_NATIVE_LIBRARY_DIR") or None
+
+
+def set_native_library_dir(path: str | None) -> bool:
+    """Set the trusted native library directory supplied by the Android host."""
+    global _NATIVE_LIBRARY_DIR_OVERRIDE
+    try:
+        candidate = Path(str(path or ""))
+        if candidate.is_dir():
+            _NATIVE_LIBRARY_DIR_OVERRIDE = str(candidate)
+            return True
+    except (OSError, ValueError):
+        pass
+    return False
+
 
 # ---------------------------------------------------------------------------
 # Architecture
@@ -164,6 +183,43 @@ def _normalise_os_name(os_name: str) -> str:
     return value
 
 
+def _guest_regular_file(root: Path, guest_path: str) -> bool:
+    """Check a guest path without resolving absolute links against Android.
+
+    Alpine's busybox applets are absolute guest links, e.g. ``/bin/sh ->
+    /bin/busybox``. ``Path.is_file()`` follows that link in the *host*
+    namespace, where Android has no ``/bin/busybox``; this made a complete
+    Alpine extraction look broken. Resolve a small link chain inside ``root``
+    instead, while refusing any relative target which would escape it.
+    """
+    root_abs = Path(os.path.abspath(root))
+    candidate = root_abs / guest_path.lstrip("/")
+    for _ in range(16):
+        try:
+            mode = candidate.lstat().st_mode
+        except OSError:
+            return False
+        if stat.S_ISREG(mode):
+            return True
+        if not stat.S_ISLNK(mode):
+            return False
+        try:
+            link_target = os.readlink(candidate)
+        except OSError:
+            return False
+        candidate = (
+            root_abs / link_target.lstrip("/")
+            if os.path.isabs(link_target)
+            else candidate.parent / link_target
+        )
+        candidate = Path(os.path.abspath(candidate))
+        try:
+            candidate.relative_to(root_abs)
+        except ValueError:
+            return False
+    return False
+
+
 def installed_os() -> str:
     """Return the installed guest name, or ``""`` when no complete rootfs exists.
 
@@ -173,7 +229,7 @@ def installed_os() -> str:
     files retain compatibility with rootfs directories made by older builds.
     """
     root = rootfs_dir()
-    if not (root / "bin" / "sh").is_file():
+    if not _guest_regular_file(root, "/bin/sh"):
         return ""
     try:
         marker = (root / "etc" / ROOTFS_OS_MARKER).read_text("utf-8").strip().lower()
@@ -233,6 +289,10 @@ def native_library_dir() -> str | None:
     """
     if not _is_android():
         return None
+    if _NATIVE_LIBRARY_DIR_OVERRIDE:
+        candidate = Path(_NATIVE_LIBRARY_DIR_OVERRIDE)
+        if candidate.is_dir():
+            return str(candidate)
     try:
         from zmux import javabridge
         activity = javabridge.mActivity()
@@ -842,8 +902,8 @@ def _safe_extract(tarball: Path, target: Path, strip_components: int = 0) -> Non
 def _bootstrap(root: Path, os_name: str) -> None:
     """Write OS-specific first-run configuration and a durable OS marker."""
     os_name = _normalise_os_name(os_name)
-    if not (root / "bin" / "sh").is_file():
-        raise RuntimeError("rootfs is missing /bin/sh after extraction")
+    if not _guest_regular_file(root, "/bin/sh"):
+        raise RuntimeError("rootfs is missing a usable guest /bin/sh after extraction")
 
     etc = root / "etc"
     etc.mkdir(parents=True, exist_ok=True)
