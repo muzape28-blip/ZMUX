@@ -6,6 +6,7 @@ import fcntl
 import termios
 import struct
 import time
+import traceback
 import sys
 
 class PtyBridge:
@@ -69,18 +70,43 @@ class PtyBridge:
                 sys.stdout.flush()
                 choice = input().strip()
                 if choice == "1":
-                    print("\n\033[32m[+]\033[0m Installing Alpine Linux...")
-                    # Mocking the install for now
-                    time.sleep(1)
-                    print("\033[32m[+]\033[0m Alpine installed successfully! Launching PRoot...")
-                    time.sleep(1)
-                    os.execv("/system/bin/sh", ["/system/bin/sh"])
+                    print("\n\033[32m[+]\033[0m Bootstrapping Alpine Linux...")
+                    try:
+                        from zmux import linuxenv
+                        def progress(msg):
+                            sys.stdout.write(msg)
+                            sys.stdout.flush()
+                        
+                        linuxenv.install(progress=progress)
+                        linuxenv.install_guest_wrappers()
+                        print("\n\033[32m[+]\033[0m Alpine installed successfully!")
+                        
+                        proot = linuxenv.proot_binary()
+                        if not proot:
+                            print("\033[33m[!] PRoot binary (libproot.so) is missing in APK.\033[0m")
+                            print("\033[33m[!] Dropping to Local Android Shell as fallback...\033[0m")
+                            time.sleep(2)
+                            os.environ["PS1"] = "\033[32mzmux\033[0m~\033[34m:\033[0m$ "
+                            os.execv("/system/bin/sh", ["/system/bin/sh"])
+                        else:
+                            print("\033[32m[+]\033[0m Launching Alpine PRoot...")
+                            cmd = linuxenv.build_command_line(["/bin/sh", "-l"], os.environ["HOME"])
+                            env = linuxenv.proot_env()
+                            os.environ.update(env)
+                            os.execv(cmd[0], cmd)
+                            
+                    except Exception as e:
+                        print(f"\n\033[31m[-] Installation failed: {e}\033[0m")
+                        traceback.print_exc(file=sys.stdout)
+                        print("\nDropping to Local Android Shell...")
+                        time.sleep(2)
+                        os.environ["PS1"] = "\033[32mzmux\033[0m~\033[34m:\033[0m$ "
+                        os.execv("/system/bin/sh", ["/system/bin/sh"])
+                        
                 elif choice == "2":
-                    print("\n\033[32m[+]\033[0m Installing Debian...")
+                    print("\n\033[33m[-]\033[0m Debian support is currently experimental and requires additional rootfs patches.")
+                    print("\033[33m[-]\033[0m Returning to menu...\n")
                     time.sleep(1)
-                    print("\033[32m[+]\033[0m Debian installed successfully! Launching PRoot...")
-                    time.sleep(1)
-                    os.execv("/system/bin/sh", ["/system/bin/sh"])
                 elif choice == "3":
                     print("\n\033[34m[*]\033[0m Dropping to Local Android Shell...")
                     os.environ["PS1"] = "\033[32mzmux\033[0m~\033[34m:\033[0m$ "

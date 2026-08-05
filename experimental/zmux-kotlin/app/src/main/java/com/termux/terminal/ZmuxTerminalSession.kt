@@ -1,75 +1,75 @@
 package com.termux.terminal
 
-import android.content.Context
+import com.chaquo.python.Python
+import com.chaquo.python.PyObject
 import com.zmux.terminal.ZmuxTheme
 
 /**
- * Wraps a [TerminalSession] and adapts it for remote PTY use over a WebSocket.
+ * Wraps a [TerminalSession] and adapts it for remote PTY use via Chaquopy.
  *
  * `TerminalSession` in Termux is a `final` class that hardcodes a JNI fork() inside
  * `initializeEmulator()`. To bypass this without forking a local process, we inject a 
- * pre-created [TerminalEmulator] via package-private access before [updateSize] is called.
- * This skips `initializeEmulator` entirely. We then set `mShellPid = 1` to trick `write()`
- * into accepting user input, which we intercept from `mTerminalToProcessIOQueue`.
+ * pre-created [TerminalEmulator] via package-private access.
+ * We then spin up a Chaquopy Python interpreter in the background which forks the real
+ * Alpine PRoot shell and communicates with us by calling `BridgeCallback`.
  */
 class ZmuxTerminalSession(
     private val client: TerminalSessionClient,
     private val transcriptRows: Int = 2000,
-    val isLocalMode: Boolean = false,
 ) {
-    val session = if (isLocalMode) {
-        val filesDir = (client as Context).filesDir.absolutePath
-        TerminalSessionHelper.createLocalSession(client, filesDir)
-    } else {
-        TerminalSession("/system/bin/sh", "/", arrayOf<String>(), arrayOf<String>(), transcriptRows, client)
-    }
+    val session = TerminalSession("/system/bin/sh", "/", arrayOf<String>(), arrayOf<String>(), transcriptRows, client)
 
     var onInput: ((ByteArray) -> Unit)? = null
     var onResize: ((Int, Int) -> Unit)? = null
 
-    private var running = true
-    private var readThread: Thread? = null
+    private var bridge: PyObject? = null
 
     init {
-        if (isLocalMode) {
-            session.initializeEmulator(80, 24)
-            ZmuxTheme.applyTo(TerminalSessionHelper.getEmulator(session))
-        } else {
-            // 1. Bypass the JNI fork by pre-seeding the emulator.
-            val emulator = TerminalEmulator(session, 80, 24, transcriptRows, client)
-            
-            // 2. Apply theme immediately.
-            ZmuxTheme.applyTo(emulator)
-            
-            // 3. Trick TerminalSession.write() into NOT discarding input, and inject emulator
-            TerminalSessionHelper.injectEmulator(session, emulator)
+        // 1. Bypass the JNI fork by pre-seeding the emulator.
+        val emulator = TerminalEmulator(session, 80, 24, transcriptRows, client)
+        
+        // 2. Apply theme immediately.
+        ZmuxTheme.applyTo(emulator)
+        
+        // 3. Inject emulator
+        TerminalSessionHelper.injectEmulator(session, emulator)
 
-            // 4. Intercept the user's keystrokes.
-            readThread = Thread {
-                val buffer = ByteArray(4096)
-                while (running) {
-                    val bytes = runCatching { TerminalSessionHelper.readQueue(session, buffer, true) }.getOrDefault(-1)
-                    if (bytes == -1) break
-                    onInput?.invoke(buffer.copyOfRange(0, bytes))
-                }
-            }.apply { start() }
+        // 4. Start Python Bridge
+        val py = Python.getInstance()
+        val bridgeModule = py.getModule("bridge")
+        bridge = bridgeModule.callAttr("PtyBridge", BridgeCallback())
+        bridge?.callAttr("start", 80, 24)
+
+        onInput = { bytes ->
+            bridge?.callAttr("write", bytes)
+        }
+        onResize = { cols, rows ->
+            bridge?.callAttr("resize", cols, rows)
         }
     }
 
-    fun feed(bytes: ByteArray) {
+    inner class BridgeCallback {
+        fun onData(data: ByteArray) {
+            val emulator = TerminalSessionHelper.getEmulator(session) ?: return
+            emulator.append(data, data.size)
+            client.onTextChanged(session)
+        }
+        fun onClosed() {
+            client.onSessionFinished(session)
+        }
+    }
+
+    fun feedLine(text: String) {
+        val bytes = ("\r\n$text\r\n").toByteArray(Charsets.UTF_8)
         val emulator = TerminalSessionHelper.getEmulator(session) ?: return
         emulator.append(bytes, bytes.size)
         client.onTextChanged(session)
     }
 
-    fun feedLine(text: String) = feed(("\r\n$text\r\n").toByteArray(Charsets.UTF_8))
-
-    val emulator: TerminalEmulator? get() = TerminalSessionHelper.getEmulator(session)
     val columns: Int get() = TerminalSessionHelper.getColumns(TerminalSessionHelper.getEmulator(session))
     val rows: Int get() = TerminalSessionHelper.getRows(TerminalSessionHelper.getEmulator(session))
 
     fun finishIfRunning() {
-        running = false
-        TerminalSessionHelper.closeQueue(session)
+        bridge?.callAttr("close")
     }
 }

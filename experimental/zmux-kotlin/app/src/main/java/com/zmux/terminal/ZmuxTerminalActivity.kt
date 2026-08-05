@@ -129,8 +129,7 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
         val welcome = "${esc}[33m=================================================${esc}[0m\r\n" +
                       "${esc}[32mWELCOME TO ZMUX, FEEL FREE TO EXEC COMMAND...${esc}[0m\r\n" +
                       "\r\n" +
-                      "(Note: The Alpine/Debian setup via linux-setup\r\n" +
-                      "is coming soon in the next ZABAWHEELS phase)\r\n" +
+                      "(Type ${esc}[34mlinux-setup${esc}[0m to install Alpine or Debian)\r\n" +
                       "${esc}[33m=================================================${esc}[0m\r\n"
         
         newSession.feed(welcome.toByteArray(Charsets.UTF_8))
