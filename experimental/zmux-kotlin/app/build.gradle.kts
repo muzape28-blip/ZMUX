@@ -14,8 +14,8 @@ android {
         applicationId = "com.zmux.terminal"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1.0-poc"
+        versionCode = 2
+        versionName = "0.1.1-proot"
 
         ndk {
             // Target: ARMv7 / Android Go class devices (Infinix Smart 9 HD) + modern arm64.
