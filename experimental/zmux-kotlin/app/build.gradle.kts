@@ -50,6 +50,21 @@ android {
     }
 }
 
+tasks.register<Exec>("buildProot") {
+    val ndkHome = System.getenv("ANDROID_NDK_LATEST_HOME") ?: System.getenv("ANDROID_NDK_HOME")
+    if (ndkHome == null) {
+        println("Skipping PRoot build: ANDROID_NDK_LATEST_HOME / ANDROID_NDK_HOME not set (safe for local debug without C++)")
+        commandLine("echo", "Skipping PRoot")
+    } else {
+        println("Building PRoot using NDK at: \$ndkHome")
+        commandLine("python3", "../scripts/build_proot_android.py", "--ndk", ndkHome, "--out", "src/main/jniLibs", "--abis", "armeabi-v7a,arm64-v8a")
+    }
+}
+
+tasks.named("preBuild") {
+    dependsOn("buildProot")
+}
+
 chaquopy {
     defaultConfig {
         version = "3.11"
