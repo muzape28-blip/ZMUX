@@ -74,6 +74,15 @@ chaquopy {
         pip {
             install("certifi==2025.8.3")
         }
+        // CI runners may only provide a newer host Python. Disabling build-time
+        // bytecode keeps the app on the supported Python 3.11 runtime (including
+        // armeabi-v7a) instead of failing on a host-Python minor mismatch.
+        // Chaquopy compiles these sources safely on the device at first use.
+        pyc {
+            src = false
+            pip = false
+            stdlib = false
+        }
     }
 }
 
