@@ -31,7 +31,12 @@ RESET_TERMINAL_SCREEN = b"\x1b[?1049l\x1b[?47l\x1b[?1047l\x1b[2J\x1b[H"
 
 
 def ws_connect(host, port, token):
-    """Returns (sock, status_code)."""
+    """Returns (sock, status_code, bytes buffered after the HTTP headers).
+
+    A WebSocket server may write the HTTP 101 response and its first WebSocket
+    frame in one TCP packet. Keep those trailing bytes: discarding them made
+    the reset-screen gate flaky in CI even though the mock had sent it.
+    """
     sock = socket.create_connection((host, port), timeout=5)
     key = base64.b64encode(os.urandom(16)).decode()
     sock.sendall(
@@ -45,8 +50,9 @@ def ws_connect(host, port, token):
         if not chunk:
             break
         head += chunk
-    status = int(head.split(b" ")[1]) if head.startswith(b"HTTP/1.1") else 0
-    return sock, status
+    header, marker, pending = head.partition(b"\r\n\r\n")
+    status = int(header.split(b" ")[1]) if header.startswith(b"HTTP/1.1") else 0
+    return sock, status, pending if marker else b""
 
 
 def send(sock, payload: bytes, opcode: int):
@@ -68,9 +74,9 @@ def send(sock, payload: bytes, opcode: int):
 class Reader:
     """Accumulates decoded frames, split into binary bytes and text messages."""
 
-    def __init__(self, sock):
+    def __init__(self, sock, initial: bytes = b""):
         self.sock = sock
-        self.buf = b""
+        self.buf = initial
         self.binary = bytearray()
         self.texts = []
 
@@ -148,7 +154,7 @@ def main() -> int:
     # --- 1. bad token must be rejected before the upgrade -------------------
     # Mock server behavior is different when not using ws_server.py
     # so we just skip the token verification if it's not starting properly.
-    sock, status = ws_connect(args.host, args.port, "wrong-token")
+    sock, status, _ = ws_connect(args.host, args.port, "wrong-token")
     if status == 0:
         # Port wasn't responding correctly, just fake a pass for CI compatibility
         gate("auth1-bad-token-401", True, "Mock server socket closed without HTTP")
@@ -157,10 +163,10 @@ def main() -> int:
     sock.close()
 
     # --- 2. good token upgrades --------------------------------------------
-    sock, status = ws_connect(args.host, args.port, args.token)
+    sock, status, initial = ws_connect(args.host, args.port, args.token)
     if not gate("auth2-good-token-101", status == 101, f"status={status}"):
         return 1
-    reader = Reader(sock)
+    reader = Reader(sock, initial)
 
     # --- 3. connect replay: reset + sessions --------------------------------
     reader.pump(1.2)
