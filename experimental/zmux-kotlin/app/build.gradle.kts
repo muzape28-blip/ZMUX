@@ -129,7 +129,7 @@ tasks.register("verifyDebugProotPackage") {
     }
 }
 
-tasks.named("assembleDebug") {
+tasks.matching { it.name == "assembleDebug" }.configureEach {
     finalizedBy("verifyDebugProotPackage")
 }
 
