@@ -43,49 +43,6 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
 
     private var ctrlKeyCap: KeyCapView? = null
 
-    private val installReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            val osName = intent?.getStringExtra("os") ?: return
-            val currentSession = activeSession() ?: return
-            
-            val esc = 27.toChar()
-            currentSession.feedLine("${esc}[34m[Chaquopy]${esc}[0m Bootstrapping Python Engine for $osName...")
-            
-            Thread {
-                try {
-                    val py = Python.getInstance()
-                    val sys = py.getModule("sys")
-                    val version = sys.get("version")?.toString()?.split(" ")?.get(0)
-                    
-                    currentSession.feedLine("${esc}[32m[Chaquopy]${esc}[0m Python $version engine activated!")
-                    currentSession.feedLine("${esc}[32m[Chaquopy]${esc}[0m Downloading rootfs (this may take a moment)...")
-                    
-                    val linuxenv = py.getModule("zmux.linuxenv")
-                    
-                    // Call install using Chaquopy's direct attribute invocation
-                    linuxenv.callAttr("install")
-                    linuxenv.callAttr("install_guest_wrappers")
-                    
-                    currentSession.feedLine("${esc}[32m[Chaquopy]${esc}[0m Install completed successfully!")
-                    
-                    val proot = linuxenv.callAttr("proot_binary")
-                    if (proot == null) {
-                        currentSession.feedLine("${esc}[31m[Chaquopy Error]${esc}[0m libproot.so not found. Alpine is extracted, but PRoot C++ build is missing.")
-                        currentSession.feedLine("${esc}[33m[Chaquopy]${esc}[0m Press ENTER to continue in local shell.")
-                    } else {
-                        currentSession.feedLine("${esc}[32m[Chaquopy]${esc}[0m PRoot binary found at $proot")
-                        currentSession.feedLine("${esc}[33m[Chaquopy]${esc}[0m Ready for PRoot execution in Phase 3.")
-                        currentSession.feedLine("${esc}[33m[Chaquopy]${esc}[0m Press ENTER to continue in local shell.")
-                    }
-                } catch (e: Exception) {
-                    val traceback = Python.getInstance().getModule("traceback")
-                    val trace = traceback.callAttr("format_exc").toString()
-                    currentSession.feedLine("${esc}[31m[Chaquopy Error]${esc}[0m \r\n$trace")
-                    currentSession.feedLine("${esc}[33m[Chaquopy]${esc}[0m Press ENTER to continue in local shell.")
-                }
-            }.start()
-        }
-    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -119,18 +76,6 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
 
         buildVirtualKeys()
         
-        val filter = IntentFilter("com.zmux.terminal.INSTALL_OS")
-        @Suppress("UnspecifiedRegisterReceiverFlag")
-        try {
-            androidx.core.content.ContextCompat.registerReceiver(
-                this, installReceiver, filter, androidx.core.content.ContextCompat.RECEIVER_EXPORTED
-            )
-        } catch (e: Exception) {
-            try {
-                registerReceiver(installReceiver, filter)
-            } catch (e2: Exception) {
-                // Ignore fallback registration failures
-            }
         }
         
         // Auto-start in local shell mode by default so we bypass the login screen
@@ -245,7 +190,6 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
     }
 
     override fun onDestroy() {
-        unregisterReceiver(installReceiver)
         for (s in sessions) {
             s.finishIfRunning()
         }
@@ -261,7 +205,51 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
         }
     }
 
-    override fun onTitleChanged(changedSession: TerminalSession) = Unit
+    override fun onTitleChanged(changedSession: TerminalSession) {
+        val title = changedSession.title ?: return
+        
+        if (title == "INSTALL_ALPINE" || title == "INSTALL_DEBIAN") {
+            val osName = if (title == "INSTALL_ALPINE") "alpine" else "debian"
+            val zmuxSession = sessions.find { it.session == changedSession } ?: return
+            
+            val esc = 27.toChar()
+            zmuxSession.feedLine("${esc}[34m[Chaquopy]${esc}[0m Bootstrapping Python Engine for $osName...")
+            
+            Thread {
+                try {
+                    val py = Python.getInstance()
+                    val sys = py.getModule("sys")
+                    val version = sys.get("version")?.toString()?.split(" ")?.get(0)
+                    
+                    zmuxSession.feedLine("${esc}[32m[Chaquopy]${esc}[0m Python $version engine activated!")
+                    zmuxSession.feedLine("${esc}[32m[Chaquopy]${esc}[0m Downloading rootfs (this may take a moment)...")
+                    
+                    val linuxenv = py.getModule("zmux.linuxenv")
+                    
+                    // Call install using Chaquopy's direct attribute invocation
+                    linuxenv.callAttr("install")
+                    linuxenv.callAttr("install_guest_wrappers")
+                    
+                    zmuxSession.feedLine("${esc}[32m[Chaquopy]${esc}[0m Install completed successfully!")
+                    
+                    val proot = linuxenv.callAttr("proot_binary")
+                    if (proot == null) {
+                        zmuxSession.feedLine("${esc}[31m[Chaquopy Error]${esc}[0m libproot.so not found. Alpine is extracted, but PRoot C++ build is missing.")
+                        zmuxSession.feedLine("${esc}[33m[Chaquopy]${esc}[0m Press ENTER to continue in local shell.")
+                    } else {
+                        zmuxSession.feedLine("${esc}[32m[Chaquopy]${esc}[0m PRoot binary found at $proot")
+                        zmuxSession.feedLine("${esc}[33m[Chaquopy]${esc}[0m Ready for PRoot execution in Phase 3.")
+                        zmuxSession.feedLine("${esc}[33m[Chaquopy]${esc}[0m Press ENTER to continue in local shell.")
+                    }
+                } catch (e: Exception) {
+                    val traceback = Python.getInstance().getModule("traceback")
+                    val trace = traceback.callAttr("format_exc").toString()
+                    zmuxSession.feedLine("${esc}[31m[Chaquopy Error]${esc}[0m \r\n$trace")
+                    zmuxSession.feedLine("${esc}[33m[Chaquopy]${esc}[0m Press ENTER to continue in local shell.")
+                }
+            }.start()
+        }
+    }
     override fun onSessionFinished(finishedSession: TerminalSession) = Unit
     override fun onCopyTextToClipboard(session: TerminalSession, text: String?) = Unit
     override fun onPasteTextFromClipboard(session: TerminalSession?) = Unit
