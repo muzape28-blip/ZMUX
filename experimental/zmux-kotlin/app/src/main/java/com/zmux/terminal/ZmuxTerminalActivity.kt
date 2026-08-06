@@ -1,5 +1,6 @@
 package com.zmux.terminal
 
+import android.os.Build
 import android.os.Bundle
 import android.view.ViewGroup
 import android.widget.HorizontalScrollView
@@ -109,6 +110,15 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
         // both sides. APP_DIR is resolved at *import* time, so this must happen
         // before Python.start() and before the first `zmux` module is imported.
         runCatching { android.system.Os.setenv("ANDROID_PRIVATE", filesDir.absolutePath, true) }
+        // Tell the Python side which device ABI we are really on. A 32-bit
+        // Chaquopy runtime on a 64-bit ARM kernel otherwise reports armv8l
+        // and we would download the wrong (armv7) rootfs, under which proot
+        // can't translate the 64-bit-only syscalls apk-tools makes.
+        runCatching {
+            val preferredAbi = Build.SUPPORTED_ABIS.firstOrNull()?.takeIf { it.isNotBlank() }
+                ?: Build.CPU_ABI
+            android.system.Os.setenv("ZMUX_DEVICE_ABI", preferredAbi, true)
+        }
 
         setContentView(R.layout.activity_terminal)
 

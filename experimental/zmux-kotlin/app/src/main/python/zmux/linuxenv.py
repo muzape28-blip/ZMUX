@@ -145,24 +145,66 @@ def _is_android() -> bool:
     )
 
 
+#: Preferred device ABI as reported by Android's Build.SUPPORTED_ABIS.
+#: Set by the Kotlin host (ZmuxTerminalActivity) *before* Python is started.
+#: When present this overrides any heuristic based on os.uname(), because a
+#: 32-bit Chaquopy runtime on a 64-bit ARM kernel reports ``armv8l`` — which
+#: is *64-bit capable* — and the old code wrongly picked the 32-bit
+#: ``armv7`` rootfs. Running armv7 binaries under proot on an aarch64
+#: kernel triggers the untranslated-syscall hang that makes ``apk`` freeze.
+_DEVICE_ABI_OVERRIDE = os.environ.get("ZMUX_DEVICE_ABI", "").strip()
+
+
+def _android_abi_to_alpine(abi: str) -> str | None:
+    abi = (abi or "").lower()
+    if abi in ("arm64-v8a", "aarch64"):
+        return "aarch64"
+    if abi in ("armeabi-v7a", "armeabi", "armv7l", "armv7", "armv8l"):
+        # armv8l is a 32-bit userspace on a 64-bit CPU; only return armv7
+        # when the device has NO 64-bit ABI (caller checks SUPPORTED_ABIS).
+        return "armv7"
+    if abi in ("x86_64", "amd64"):
+        return "x86_64"
+    if abi in ("x86", "i686"):
+        return "x86"
+    return None
+
+
 def alpine_arch() -> str:
-    """Map the running platform to an Alpine minirootfs arch."""
+    """Map the running platform to an Alpine minirootfs arch.
+
+    Order of precedence:
+
+    1. ``ZMUX_DEVICE_ABI`` env var (set by Kotlin from Build.SUPPORTED_ABIS).
+    2. ``os.uname().machine`` heuristics for non-Android hosts (desktop tests).
+    """
     if _is_android():
+        # 1. Trust the host's explicit ABI override.
+        if _DEVICE_ABI_OVERRIDE:
+            mapped = _android_abi_to_alpine(_DEVICE_ABI_OVERRIDE)
+            if mapped:
+                return mapped
+        # 2. Fall back to the kernel machine, but treat armv8l as aarch64:
+        #    on Android that string means "32-bit process on a 64-bit CPU",
+        #    and we want the 64-bit rootfs so proot does not have to run
+        #    32-bit compat syscalls it does not translate.
         machine = os.uname().machine.lower()
-        bits = 32 if sys.maxsize <= 2**32 else 64
-        if machine in ("aarch64", "arm64", "arm64-v8a"):
+        if machine in ("aarch64", "arm64", "arm64-v8a", "armv8l"):
             return "aarch64"
-        if machine in ("armv7l", "armv8l", "armeabi-v7a", "arm"):
+        if machine in ("armv7l", "armeabi-v7a", "arm"):
             return "armv7"
         if machine in ("x86_64", "amd64"):
             return "x86_64"
+        if machine in ("x86", "i686"):
+            return "x86"
         return machine
+    # Non-Android (desktop / CI).
     machine = os.uname().machine.lower()
     if machine in ("x86_64", "amd64"):
         return "x86_64"
-    if machine in ("aarch64", "arm64"):
+    if machine in ("aarch64", "arm64", "armv8l"):
         return "aarch64"
-    if machine in ("armv7l", "armv8l"):
+    if machine in ("armv7l",):
         return "armv7"
     return machine
 
@@ -256,6 +298,17 @@ def installed_os() -> str:
     if (root / "etc" / "alpine-release").is_file():
         return "alpine"
     return ""
+
+
+def installed_arch() -> str:
+    """Return the ``/etc/apk/arch`` string of the installed rootfs, or ``""``."""
+    if installed_os() != "alpine":
+        return ""
+    arch_file = rootfs_dir() / "etc" / "apk" / "arch"
+    try:
+        return arch_file.read_text("utf-8").strip()
+    except OSError:
+        return ""
 
 
 def is_installed() -> bool:
@@ -943,13 +996,29 @@ def install(progress=None, os_name="alpine") -> dict:
 
     current = installed_os()
     if current == selected:
-        return {
-            "ok": True,
-            "already": True,
-            "os": current,
-            "version": installed_version(),
-            "path": str(rootfs_dir()),
-        }
+        # If the rootfs arch does not match the device's best ABI
+        # (e.g. a 32-bit armv7 rootfs under a 64-bit kernel because an
+        # older ZMUX picked it from `uname -m`), treat it as not installed
+        # so the caller re-downloads the correct rootfs. Running the wrong
+        # arch under proot makes apk/libcrypto hang on syscalls that proot
+        # does not translate in compat mode.
+        wanted_arch = alpine_arch()
+        have_arch = installed_arch()
+        if have_arch and have_arch != wanted_arch:
+            report(
+                f"Installed rootfs is {have_arch} but this device is "
+                f"{wanted_arch}; replacing it with the correct rootfs…\n"
+            )
+            shutil.rmtree(rootfs_dir(), ignore_errors=True)
+            current = ""
+        else:
+            return {
+                "ok": True,
+                "already": True,
+                "os": current,
+                "version": installed_version(),
+                "path": str(rootfs_dir()),
+            }
 
     if current:
         report(f"Replacing installed {current.capitalize()} environment safely…\n")

@@ -112,6 +112,57 @@ class LinuxEnvInstallTests(unittest.TestCase):
         repos = (root / "etc/apk/repositories").read_text()
         self.assertIn(linuxenv.ALPINE_BRANCH, repos)
 
+    def test_zmux_device_abi_picks_aarch64_on_armv8l_kernel(self) -> None:
+        # The override is read at module import, so patch the module-level
+        # constant directly. On device, Kotlin sets ZMUX_DEVICE_ABI before
+        # Python starts, so there is no race there.
+        old = linuxenv._DEVICE_ABI_OVERRIDE
+        try:
+            linuxenv._DEVICE_ABI_OVERRIDE = "arm64-v8a"
+            self.assertEqual(linuxenv.alpine_arch(), "aarch64")
+        finally:
+            linuxenv._DEVICE_ABI_OVERRIDE = old
+
+    def test_install_replaces_rootfs_when_arch_mismatches(self) -> None:
+        import os as _os
+        from unittest.mock import patch as _patch
+        old_env = _os.environ.get("ZMUX_DEVICE_ABI")
+        old_android = _os.environ.get("ANDROID_PRIVATE")
+        old_rootfs = linuxenv._ROOTFS_DIR
+        try:
+            _os.environ["ZMUX_DEVICE_ABI"] = "arm64-v8a"
+            _os.environ["ANDROID_PRIVATE"] = "/tmp"
+            fake_root = self.root / "wrong-arch-rootfs"
+            fake_root.mkdir(parents=True)
+            (fake_root / "bin").mkdir(parents=True)
+            (fake_root / "bin/sh").write_text("#!/bin/sh\n")
+            etc = fake_root / "etc"
+            etc.mkdir()
+            (etc / ".zmux-rootfs").write_text("alpine\n")
+            (etc / "alpine-release").write_text("3.22.0\n")
+            apk = etc / "apk"
+            apk.mkdir()
+            (apk / "arch").write_text("armv7\n")
+            linuxenv._ROOTFS_DIR = fake_root
+
+            with self.assertRaisesRegex(RuntimeError, "download attempted"):
+                with _patch(
+                    "urllib.request.urlopen",
+                    side_effect=RuntimeError("download attempted"),
+                ):
+                    linuxenv.install()
+            self.assertFalse(fake_root.exists())
+        finally:
+            if old_env is None:
+                _os.environ.pop("ZMUX_DEVICE_ABI", None)
+            else:
+                _os.environ["ZMUX_DEVICE_ABI"] = old_env
+            if old_android is None:
+                _os.environ.pop("ANDROID_PRIVATE", None)
+            else:
+                _os.environ["ANDROID_PRIVATE"] = old_android
+            linuxenv._ROOTFS_DIR = old_rootfs
+
     def test_install_accepts_java_style_progress_callback_end_to_end(self) -> None:
         archive = self._tar(
             "alpine-rootfs.tar.gz",
