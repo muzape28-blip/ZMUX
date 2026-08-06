@@ -69,22 +69,79 @@ def _gradle_root() -> Path:
     )
 
 
+def _jar_provides_interface(jar: Path) -> bool:
+    """True if `jar` actually contains TerminalSessionClient.class.
+
+    We search by filename across several possible Gradle cache layouts
+    (JitPack groupId vs mavenCoordinate differ, and AAR vs JAR differ), so
+    we verify by asking `jar tf` for the expected class entry. Using
+    `unzip -l` would also work, but `jar` ships with the JDK that this
+    check already requires for javap.
+    """
+    jar_tool = shutil.which("jar")
+    if not jar_tool:
+        # No `jar` binary — fall back to filename + parent dir heuristic.
+        # Good enough on the environments we care about (CI has a full JDK).
+        return jar.is_file()
+    listing = subprocess.run(
+        [jar_tool, "tf", str(jar)], capture_output=True, text=True, check=False
+    )
+    if listing.returncode != 0:
+        return False
+    expected = "com/termux/terminal/TerminalSessionClient.class"
+    return expected in listing.stdout
+
+
 def find_terminal_emulator_jar() -> Path | None:
-    """Locate terminal-emulator-0.118.0.jar inside the Gradle cache or build tree."""
-    candidates: list[Path] = []
+    """Locate terminal-emulator-0.118.0.jar in the Gradle cache or build tree.
 
-    cache = _gradle_root() / "caches/modules-2/files-2.1" / TERMUX_GROUP / TERMUX_ARTIFACT
-    if cache.is_dir():
-        candidates.extend(cache.rglob(f"{TERMUX_ARTIFACT}-{TERMUX_VERSION}.jar"))
+    Termux publishes via JitPack where the on-disk group can be either
+    `com.termux.termux-app` or `com.termux` depending on which coordinate
+    resolved, so we search broadly by filename and verify the candidate
+    with _jar_provides_interface() instead of hard-coding one group path.
+    """
+    name_glob = f"{TERMUX_ARTIFACT}-{TERMUX_VERSION}.jar"
+    search_roots: list[Path] = []
 
-    # Some configurations also resolve the sources/classes into the build dir.
+    gradle = _gradle_root()
+    modules = gradle / "caches/modules-2/files-2.1"
+    if modules.is_dir():
+        search_roots.append(modules)
+    # Transforms hold exploded AARs in newer AGP; the classes.jar inside
+    # them is named "classes.jar", not terminal-emulator-0.118.0.jar, so
+    # we handle that case separately below.
+    for transforms in gradle.glob("caches/transforms-*"):
+        if transforms.is_dir():
+            search_roots.append(transforms)
+
+    # Project-local build intermediates (CI classpath, exploded AARs).
     build = PROJECT_ROOT / "build"
     if build.is_dir():
-        candidates.extend(build.rglob(f"{TERMUX_ARTIFACT}-{TERMUX_VERSION}.jar"))
+        search_roots.append(build)
+    app_build = PROJECT_ROOT / "app/build"
+    if app_build.is_dir():
+        search_roots.append(app_build)
+
+    candidates: list[Path] = []
+    for root in search_roots:
+        candidates.extend(root.rglob(name_glob))
+        # Inside transformed AARs the terminal-emulator classes live in a
+        # file named classes.jar alongside a path containing
+        # "terminal-emulator"; those contain the interface we want too.
+        if "transforms" in str(root) or root in (build, app_build):
+            for classes_jar in root.rglob("classes.jar"):
+                try:
+                    if TERMUX_ARTIFACT in str(classes_jar):
+                        candidates.append(classes_jar)
+                except OSError:
+                    pass
 
     for jar in candidates:
-        if jar.is_file():
-            return jar
+        try:
+            if jar.is_file() and _jar_provides_interface(jar):
+                return jar
+        except OSError:
+            continue
     return None
 
 
@@ -153,6 +210,25 @@ def main() -> int:
 
     jar = find_terminal_emulator_jar()
     if jar is None:
+        # In CI this step runs after assembleDebug, so the JAR must be
+        # present. If it is not, that is a real failure (silently skipping
+        # would let the guard "pass" while checking nothing). Locally we
+        # skip so plain `python3` invocations without a Gradle build stay
+        # green.
+        import os as _os
+        # In CI (GitHub Actions sets CI=true) or when explicitly requested,
+        # a missing JAR after assembleDebug is a real failure. Locally we
+        # skip so plain `python3` invocations stay green.
+        strict = (
+            _os.environ.get("ZMUX_STRICT_INTERFACE_CHECK") == "1"
+            or _os.environ.get("CI") == "true"
+        )
+        if strict:
+            print(
+                "FAIL: terminal-emulator JAR not found after assembleDebug; "
+                "cannot verify TerminalSessionClient overrides."
+            )
+            return 1
         print(
             "note: terminal-emulator JAR not found; "
             "run ./gradlew :app:assembleDebug first. Skipping interface check."
