@@ -1,9 +1,9 @@
-.PHONY: all test build lint clean protocol-check linuxenv-test
+.PHONY: all test build lint clean protocol-check linuxenv-test wx-safety-test
 
 all: test build
 
-# 1. Run protocol and rootfs-installer regression checks.
-test: protocol-check linuxenv-test
+# 1. Run protocol, rootfs-installer and W^X permission-safety regression checks.
+test: protocol-check linuxenv-test wx-safety-test
 protocol-check:
 	@echo "--- Running ZMUX RFC-6455 Protocol Conformance Check ---"
 	@python3 experimental/zmux-kotlin/tools/mock_pty_ws_server.py --host 127.0.0.1 --port 8011 --token dev & \
@@ -15,6 +15,10 @@ protocol-check:
 linuxenv-test:
 	@echo "--- Running Linux rootfs installer regression tests ---"
 	@PYTHONDONTWRITEBYTECODE=1 python3 experimental/zmux-kotlin/tests/test_linuxenv.py
+
+wx-safety-test: linuxenv-test
+	@echo "--- Running W^X / 'Permission denied' safety gates ---"
+	@PYTHONDONTWRITEBYTECODE=1 python3 experimental/zmux-kotlin/tests/test_wx_permission_safety.py
 
 # 2. Build Android Debug APK (requires JDK 17 & Gradle/Android SDK)
 build:

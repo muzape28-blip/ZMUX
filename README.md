@@ -38,6 +38,31 @@ Workflow CI dirancang untuk berjalan otomatis pada setiap `push`, `pull_request`
 
 ---
 
+## 🛡️ Perbaikan "Permission Denied" Total (Android W^X) & Auto-Reopen Linux
+
+Gejala lama saat aplikasi ditutup lalu dibuka lagi:
+
+```
+: /data/user/0/com.zmux.terminal.debug/files/.zmuxrc[1]:
+  /data/user/0/com.zmux.terminal.debug/files/bin/clear: Permission denied
+```
+
+**Akar masalah:** APK ini menargetkan SDK 34, dan sejak Android 10 (target SDK 29+) kernel/SELinux melakukan blokir `execve()` untuk *setiap* file reguler di direktori privat aplikasi (`/data/user/0/<pkg>/files/...`) — aturan **W^X**. `chmod 755` tidak menolong; `execve` selalu dijawab `EACCES` → mksh mencetak `Permission denied`. Backend Python memang menulis wrapper CLI (`files/bin/clear`, `help`, `zpip`, ...) dan shell bootstrap Kotlin menaruh `files/bin` di urutan **pertama** `PATH`, sehingga `clear` di `.zmuxrc` menabrak wrapper tersebut.
+
+**Perbaikan menyeluruh (semua jalur):**
+1. **Shell bootstrap (Kotlin)** — `PATH` kini *system-only* (`/system/bin:/system/xbin:/vendor/bin`); `files/bin` tidak pernah ada di `PATH` sehingga `clear` kembali ke toybox. `linux-setup` tetap jalan lewat interpreter `sh <path>` (membaca file tidak butuh izin exec).
+2. **Auto-reopen lingkungan Linux** — jika rootfs Alpine/Debian sudah terinstal dan terverifikasi (`bin/sh` guest dengan symlink absolut busybox ikut diresolve, marker `etc/.zmux-rootfs`, `libproot.so` executable), `createNewSession()` langsung membuka PTY PRoot → guest `/bin/sh -l`. Pengguna tidak lagi terdampar di shell bootstrap setelah *close/re-open*, dan tab `[+]` baru ikut konsisten.
+3. **Peluncur PRoot Kotlin setara Python** — self-heal SONAME `libtalloc` ke `files/lib`, bind storage hanya untuk path yang benar-benar *readable+executable* (`/sdcard` dsb. dilewati tanpa izin), bind `resolv.conf`, dan mountpoint guest dibuat otomatis.
+4. **Runtime Python** — `zmux.paths.android_exec_blocked()` mendeteksi sandbox W^X: wrapper tetap ditulis + `chmod 0755` (untuk dipakai via interpreter/desktop), tetapi `BIN_DIR` **tidak** lagi di-prepend ke `PATH`, konten lama di `os.environ["PATH"]` di-scrub saat import, dan semua pembangun env (`zmux.env.build_path`, `terminal._build_env`) menjamin tidak ada entri `PATH` milik direktori privat aplikasi.
+
+**Gate pengujian baru** — `tests/test_wx_permission_safety.py` (15 gates): simulasi runtime Android pada interpreter bersih, emulasi resolusi mksh, *eksekusi byte-asli `.zmuxrc` yang diekstrak dari sumber Java* di bawah `bash` dengan direktori `bin` berisi jebakan (negatif-kontrol ikut membuktikan layout lama pasti menembak jebakan), dan kontrak statik kode Kotlin/Java yang terpasang.
+
+```bash
+make test   # 9/9 gate protokol + 8/8 installer + 15/15 W^X safety — semua hijau
+```
+
+---
+
 ## 🛠️ Quickstart & Local Development
 
 Untuk kenyamanan pengembangan lokal dan kesetaraan dengan lingkungan CI, repositori ini dilengkapi dengan **`Makefile`** di root direktori:

@@ -106,9 +106,57 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
         newSessionButton.setOnClickListener { createNewSession() }
 
         buildVirtualKeys()
-        
-        // Auto-start in local shell mode by default so we bypass the login screen
+
+        // Auto-start one session. When a verified rootfs already exists we go
+        // straight back into Alpine/Debian — a recreated activity (app swiped
+        // away and re-opened) must never strand the user in the bootstrap
+        // shell again. The local mksh shell is now only the pre-install
+        // bootstrap whose one job is `linux-setup`.
         createNewSession()
+    }
+
+    /** What [detectInstalledLinux] found: everything needed to relaunch PRoot. */
+    private data class InstalledLinux(
+        val osName: String,
+        val prootPath: String,
+        val rootfsDir: String,
+        val homeDir: String,
+    )
+
+    /**
+     * Detect an already-installed, already-verified guest rootfs without
+     * touching the Python runtime. Mirrors linuxenv.installed_os():
+     * guest /bin/sh must resolve (busybox absolute links included) and the OS
+     * marker decides the flavour. PRoot must come from nativeLibraryDir — the
+     * only directory Android allows execve() from — so its own executable
+     * check also gates the launch.
+     */
+    private fun detectInstalledLinux(): InstalledLinux? {
+        val rootfs = java.io.File(filesDir, "linux/rootfs")
+        if (!rootfs.isDirectory) return null
+        if (!TerminalSessionHelper.guestRegularFile(rootfs, "bin/sh")) return null
+
+        val osName = run {
+            val marker = java.io.File(rootfs, "etc/.zmux-rootfs")
+            val fromMarker = runCatching { marker.takeIf { it.isFile }?.readText()?.trim()?.lowercase() }
+                .getOrNull()
+            when {
+                fromMarker in setOf("alpine", "debian") -> fromMarker!!
+                java.io.File(rootfs, "etc/alpine-release").isFile -> "alpine"
+                java.io.File(rootfs, "etc/debian_version").isFile -> "debian"
+                else -> return null
+            }
+        }
+
+        val proot = java.io.File(applicationInfo.nativeLibraryDir, "libproot.so")
+        if (!proot.isFile || !proot.canExecute()) return null
+
+        return InstalledLinux(
+            osName = osName,
+            prootPath = proot.absolutePath,
+            rootfsDir = rootfs.absolutePath,
+            homeDir = java.io.File(filesDir, "home").absolutePath,
+        )
     }
 
     private fun activeSession(): ZmuxTerminalSession? {
@@ -117,8 +165,25 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
     }
 
     private fun createNewSession() {
-        val newSession = ZmuxTerminalSession(this)
+        val installed = detectInstalledLinux()
+        val newSession = if (installed != null) {
+            // A verified rootfs + executable PRoot: reopen the real guest
+            // shell directly. Guest binaries run through PRoot's ptrace mmap,
+            // so the host W^X execve ban never applies inside the guest.
+            ZmuxTerminalSession(
+                this,
+                installed.prootPath,
+                applicationInfo.nativeLibraryDir,
+                installed.rootfsDir,
+                installed.homeDir,
+            )
+        } else {
+            ZmuxTerminalSession(this)
+        }
         sessions.add(newSession)
+        if (installed != null) {
+            statusPill.setState(StatusPillView.State.CONNECTED, "${installed.osName} via PRoot")
+        }
         switchToSession(sessions.size - 1)
     }
 

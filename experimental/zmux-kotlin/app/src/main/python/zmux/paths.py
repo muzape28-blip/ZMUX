@@ -139,6 +139,37 @@ def legacy_user_packages_pythonpath(existing: str = "") -> str:
 #: distinguishes supported app controls from legacy compatibility names.
 CLI_COMMANDS = WRAPPER_COMMANDS
 
+
+def android_exec_blocked() -> bool:
+    """True when the OS forbids execve() of app-private files (Android W^X).
+
+    Apps targeting Android 10+ (this APK targets SDK 34) cannot ``execve()``
+    *any* regular file inside their private data directory — the SELinux
+    ``app_data_file`` rule answers ``EACCES`` no matter the chmod bits, and
+    every affected call surfaces to the user as ``Permission denied``. The
+    only directories Android allows execution from are the APK's extracted
+    ``nativeLibraryDir`` (``libproot.so`` lives there) and whatever PRoot maps
+    for the guest via ``ptrace`` + ``mmap(PROT_EXEC)``.
+
+    Consequence: the generated wrappers under :data:`BIN_DIR` are useful on
+    desktop/CI (where a real ``python`` exists and execve works) and as
+    interpreter scripts (``sh <path>`` only *reads* them), but they must never
+    appear on ``PATH`` in the Android runtime — a PATH lookup landing inside
+    ``BIN_DIR`` is guaranteed to end in ``Permission denied``, and wrapper
+    names that shadow system applets (``clear`` vs ``/system/bin/clear``)
+    break those commands outright.
+    """
+    return any(
+        key in os.environ
+        for key in (
+            "ANDROID_PRIVATE",
+            "ANDROID_ARGUMENT",
+            "ANDROID_APP_PATH",
+            "ZMUX_NATIVE_LIBRARY_DIR",
+        )
+    )
+
+
 #: Wrapper template shared by every ZMUX command. Each script re-enters the
 #: Python runtime via ``python -m zmux.cli "$0" "$@"`` so the typed command
 #: name is recovered from the invoked path. ``PYTHONPATH`` is pinned to the
@@ -168,15 +199,47 @@ def _prepend_to_path(directory: Path) -> None:
         os.environ["PATH"] = entry + (os.pathsep + current if current else "")
 
 
+def _scrub_exec_blocked_path() -> None:
+    """Drop app-sandbox entries from the *process* PATH (Android W^X).
+
+    Only relevant when :func:`android_exec_blocked` is true: every execve()
+    into the app-private directory is kernel-denied, so any such PATH entry —
+    however it got in (stale prepend, embedding host, hand-built shell env) —
+    can only manufacture ``Permission denied`` for the user. Removing it makes
+    even bare ``os.environ`` spawns safe, not just :func:`zmux.env.build_path`
+    consumers.
+    """
+    current = os.environ.get("PATH", "")
+    if not current:
+        return
+    bin_dir = str(BIN_DIR)
+    app_prefix = str(APP_DIR) + os.path.sep
+    kept = [
+        part
+        for part in current.split(os.pathsep)
+        if part and part != bin_dir and not part.startswith(app_prefix)
+    ]
+    joined = os.pathsep.join(kept)
+    if joined != current:
+        os.environ["PATH"] = joined
+
+
 def ensure_cli_wrappers() -> Path:
     """
     (Re)generate the executable ZMUX shell wrappers inside BIN_DIR.
 
     Every wrapper is a ``#!/system/bin/sh`` script that execs
     ``python -m zmux.cli "$0" "$@"`` (falling back to ``python3`` when
-    ``python`` is unavailable) and is chmod'ed 0o755. BIN_DIR is also
-    prepended to ``os.environ["PATH"]`` so the current process and all of
-    its children resolve the commands transparently.
+    ``python`` is unavailable) and is chmod'ed 0o755. On desktop/CI runtimes
+    BIN_DIR is also prepended to ``os.environ["PATH"]`` so the current
+    process and all of its children resolve the commands transparently.
+
+    Under Android's W^X rule (:func:`android_exec_blocked`) the PATH prepend
+    is skipped on purpose: execve() of anything in app-private storage is
+    kernel-denied, so exposing these scripts on PATH could only produce
+    ``Permission denied`` — including shadowing real system applets such as
+    ``/system/bin/clear``. The files are still written (interpreters like
+    ``sh <path>`` merely *read* them, which stays legal).
     """
     BIN_DIR.mkdir(parents=True, exist_ok=True)
     # Directory that contains the "zmux" package (importable via -m).
@@ -191,13 +254,17 @@ def ensure_cli_wrappers() -> Path:
         if current != content:
             wrapper.write_text(content, encoding="utf-8", newline="\n")
         os.chmod(wrapper, 0o755)
-    _prepend_to_path(BIN_DIR)
+    if android_exec_blocked():
+        _scrub_exec_blocked_path()
+    else:
+        _prepend_to_path(BIN_DIR)
     return BIN_DIR
 
 
-# Generate the wrappers and expose BIN_DIR on PATH at import time so the
-# commands work from the very first PTY session. Never let a filesystem hiccup
-# break app startup — the worst case is the legacy "not found" behaviour.
+# Generate the wrappers at import time (and expose BIN_DIR on PATH where the
+# OS allows executing app-private files) so the commands work from the very
+# first PTY session. Never let a filesystem hiccup break app startup — the
+# worst case is the legacy "not found" behaviour.
 try:
     ensure_cli_wrappers()
 except OSError:
