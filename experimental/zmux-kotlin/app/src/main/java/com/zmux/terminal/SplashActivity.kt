@@ -3,22 +3,24 @@ package com.zmux.terminal
 import android.content.Intent
 import android.graphics.Color
 import android.os.Bundle
+import android.view.Gravity
 import android.view.WindowManager
+import android.widget.FrameLayout
+import android.widget.ImageView
 import androidx.appcompat.app.AppCompatActivity
 
 /**
- * Cold-start intro: a full-screen black canvas with a "cmatrix" rain, then it
+ * Cold-start intro: a static centered app logo on a black canvas, then it
  * hands off to the real terminal.
  *
- * Purely cosmetic — it never touches the Python / PRoot / Chaquopy stack, so it
- * cannot affect the W^X ("Permission denied") or APP_DIR-alignment gates, nor
- * the terminal's auto-reopen behaviour on activity recreation.
+ * The previous animated matrix rain was removed to keep startup as light as
+ * possible on low-end Android Go devices. This screen never touches the
+ * Python / PRoot / Chaquopy stack.
  */
 class SplashActivity : AppCompatActivity() {
-    private lateinit var rain: MatrixRainView
     private var launched = false
 
-    // How long the rain shows before the terminal opens (ms). Tap to skip.
+    // How long the logo shows before the terminal opens (ms). Tap to skip.
     private val splashMs = 2400L
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -27,24 +29,34 @@ class SplashActivity : AppCompatActivity() {
             WindowManager.LayoutParams.FLAG_FULLSCREEN,
             WindowManager.LayoutParams.FLAG_FULLSCREEN
         )
-        rain = MatrixRainView(this)
-        rain.setBackgroundColor(Color.BLACK)
-        setContentView(rain)
-        rain.start()
-        rain.postDelayed({ launchTerminal() }, splashMs)
-        rain.setOnClickListener { launchTerminal() }
+
+        val density = resources.displayMetrics.density
+        val logoSize = (144 * density).toInt()
+
+        val logo = ImageView(this).apply {
+            setImageResource(R.mipmap.ic_launcher)
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            adjustViewBounds = true
+            contentDescription = getString(R.string.app_name)
+            layoutParams = FrameLayout.LayoutParams(logoSize, logoSize).apply {
+                gravity = Gravity.CENTER
+            }
+        }
+
+        val root = FrameLayout(this).apply {
+            setBackgroundColor(Color.BLACK)
+            addView(logo)
+            setOnClickListener { launchTerminal() }
+        }
+
+        setContentView(root)
+        root.postDelayed({ launchTerminal() }, splashMs)
     }
 
     private fun launchTerminal() {
         if (launched) return
         launched = true
-        rain.stop()
         startActivity(Intent(this, ZmuxTerminalActivity::class.java))
         finish()
-    }
-
-    override fun onDestroy() {
-        rain.stop()
-        super.onDestroy()
     }
 }

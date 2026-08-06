@@ -6,7 +6,7 @@
         <item name="android:colorBackground">@color/zmux_bg</item>
     </style>
 
-    <!-- Cold-start splash: pure black, no chrome, so the cmatrix rain owns the screen. -->
+    <!-- Cold-start splash: pure black, no chrome, so the centered logo owns the screen. -->
     <style name="Theme.Zmux.Splash" parent="Theme.Material3.Dark.NoActionBar">
         <item name="android:windowFullscreen">true</item>
         <item name="android:windowNoTitle">true</item>

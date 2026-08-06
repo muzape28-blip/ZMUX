@@ -42,6 +42,21 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
     private val installInProgress = AtomicBoolean(false)
 
     /**
+     * Python runtime startup/import runs off the main thread to avoid Android's
+     * "application not responding" dialog on low-end devices during cold start.
+     */
+    private val pythonStartupInProgress = AtomicBoolean(false)
+    private var pythonStartupFailed: String? = null
+
+    /**
+     * Set after [preparePythonRuntime] finishes. The initial shell is local so
+     * the terminal can paint immediately; if a guest rootfs is installed this
+     * session is replaced once Python has reported its exact paths.
+     */
+    @Volatile private var pythonRuntimeReady = false
+    private var autoOpenLinuxPending = true
+
+    /**
      * Chaquopy runs the installer on a worker thread. TerminalEmulator and
      * TerminalView are UI objects, so every byte returned by Python must cross
      * back to the main thread before it is appended or painted.
@@ -95,10 +110,6 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
         // before Python.start() and before the first `zmux` module is imported.
         runCatching { android.system.Os.setenv("ANDROID_PRIVATE", filesDir.absolutePath, true) }
 
-        if (!Python.isStarted()) {
-            Python.start(AndroidPlatform(this))
-        }
-
         setContentView(R.layout.activity_terminal)
 
         terminalView = findViewById(R.id.terminal_view)
@@ -118,18 +129,136 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
             activeSession()?.let { it.onResize?.invoke(it.columns, it.rows) }
         }
 
-        statusPill.setState(StatusPillView.State.CONNECTED, "local shell")
+        statusPill.setState(StatusPillView.State.CONNECTING, "starting shell")
 
         newSessionButton.setOnClickListener { createNewSession() }
 
         buildVirtualKeys()
 
-        // Auto-start one session. When a verified rootfs already exists we go
-        // straight back into Alpine/Debian — a recreated activity (app swiped
-        // away and re-opened) must never strand the user in the bootstrap
-        // shell again. The local mksh shell is now only the pre-install
-        // bootstrap whose one job is `linux-setup`.
-        createNewSession()
+        // Open /system/bin/sh first so the UI is responsive immediately.
+        // Python initialization and rootfs detection are moved to a worker;
+        // when a guest is installed the bootstrap tab is replaced in place.
+        createInitialSession()
+        preparePythonRuntime()
+    }
+
+    /** Imported once by [linuxenv]; Chaquopy caches the module itself too. */
+    private var linuxenvModule: PyObject? = null
+
+    /** One-shot note from [linuxenv]'s legacy-install migration, or null. */
+    private var legacyInstallNote: String? = null
+
+    private fun createInitialSession() {
+        val session = ZmuxTerminalSession(this)
+        sessions.add(session)
+        switchToSession(0)
+        statusPill.setState(StatusPillView.State.CONNECTED, "local shell")
+    }
+
+    private fun preparePythonRuntime() {
+        if (pythonRuntimeReady) {
+            onPythonRuntimeReady()
+            return
+        }
+        if (pythonStartupFailed != null) return
+        if (!pythonStartupInProgress.compareAndSet(false, true)) return
+
+        Thread {
+            try {
+                if (!Python.isStarted()) {
+                    Python.start(AndroidPlatform(this@ZmuxTerminalActivity))
+                }
+                val module = Python.getInstance().getModule("zmux.linuxenv")
+                module.callAttr("set_native_library_dir", applicationInfo.nativeLibraryDir)
+                val note = module.callAttr("migrate_legacy_install")
+                    ?.toString()?.trim()?.takeIf { it.isNotEmpty() && it != "None" }
+
+                synchronized(this) {
+                    linuxenvModule = module
+                    legacyInstallNote = note
+                    pythonRuntimeReady = true
+                }
+
+                runOnUiThread { onPythonRuntimeReady() }
+            } catch (error: Throwable) {
+                pythonStartupFailed = formatInstallFailure(error)
+                runOnUiThread {
+                    statusPill.setState(StatusPillView.State.DISCONNECTED, "python unavailable")
+                    activeSession()?.let {
+                        appendTerminalLine(
+                            it,
+                            "\u001b[33m[ZMUX]\u001b[0m Python runtime is unavailable; local shell remains usable.\n" +
+                                (pythonStartupFailed ?: "unknown startup error")
+                        )
+                    }
+                }
+            } finally {
+                pythonStartupInProgress.set(false)
+            }
+        }.start()
+    }
+
+    private fun onPythonRuntimeReady() {
+        if (isFinishing || isDestroyed) return
+        statusPill.setState(StatusPillView.State.CONNECTED, "local shell")
+
+        // If the first tab is still the untouched bootstrap shell and a guest
+        // exists, transparently replace it with PRoot so the user lands in Linux.
+        if (autoOpenLinuxPending) {
+            autoOpenLinuxPending = false
+            val bootstrap = sessions.firstOrNull()
+            if (bootstrap != null) {
+                statusPill.setState(StatusPillView.State.CONNECTING, "checking Linux")
+                Thread {
+                    val installed = detectInstalledLinux()
+                    runOnUiThread {
+                        if (isFinishing || isDestroyed) return@runOnUiThread
+                        if (installed != null && sessions.contains(bootstrap)) {
+                            replaceSessionWithLinux(bootstrap, installed)
+                        } else {
+                            statusPill.setState(StatusPillView.State.CONNECTED, "local shell")
+                            showLegacyInstallNote(bootstrap)
+                        }
+                    }
+                }.start()
+                return
+            }
+        }
+
+        activeSession()?.let { showLegacyInstallNote(it) }
+    }
+
+    private fun replaceSessionWithLinux(
+        bootstrapSession: ZmuxTerminalSession,
+        installed: InstalledLinux,
+    ) {
+        val index = sessions.indexOf(bootstrapSession)
+        if (index < 0) return
+        replaceSessionWithLinuxAt(index, bootstrapSession, installed)
+    }
+
+    private fun replaceSessionWithLinuxAt(
+        index: Int,
+        bootstrapSession: ZmuxTerminalSession,
+        installed: InstalledLinux,
+    ) {
+        if (isFinishing || isDestroyed) return
+        if (index !in sessions.indices || sessions[index] !== bootstrapSession) return
+
+        bootstrapSession.finishIfRunning()
+        val linuxSession = ZmuxTerminalSession(
+            this,
+            installed.prootPath,
+            applicationInfo.nativeLibraryDir,
+            installed.rootfsDir,
+            installed.homeDir,
+        )
+        sessions[index] = linuxSession
+        activeSessionIndex = index
+        terminalView.attachSession(linuxSession.session)
+        statusPill.setState(StatusPillView.State.CONNECTED, "${installed.osName} via PRoot")
+        renderLocalTabs()
+        terminalView.requestFocus()
     }
 
     /** What [detectInstalledLinux] found: everything needed to relaunch PRoot. */
@@ -139,12 +268,6 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
         val rootfsDir: String,
         val homeDir: String,
     )
-
-    /** Imported once by [linuxenv]; Chaquopy caches the module itself too. */
-    private var linuxenvModule: PyObject? = null
-
-    /** One-shot note from [linuxenv]'s legacy-install migration, or null. */
-    private var legacyInstallNote: String? = null
 
     /**
      * The `zmux.linuxenv` module, ready to answer path questions.
@@ -161,21 +284,9 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
      */
     @Synchronized
     private fun linuxenv(): PyObject? {
-        linuxenvModule?.let { return it }
-        return runCatching {
-            val module = Python.getInstance().getModule("zmux.linuxenv")
-            // nativeLibraryDir is the only directory Android allows execve()
-            // from, and Chaquopy cannot discover it: hand it over before any
-            // path/proot query.
-            module.callAttr("set_native_library_dir", applicationInfo.nativeLibraryDir)
-            // Adopt a rootfs left behind by a pre-alignment build (it lives in
-            // Chaquopy's asset tree) instead of making the user download the
-            // guest a second time. Renames only — never a blocking copy.
-            legacyInstallNote = module.callAttr("migrate_legacy_install")
-                ?.toString()?.trim()?.takeIf { it.isNotEmpty() && it != "None" }
-            linuxenvModule = module
-            module
-        }.getOrNull()
+        // preparePythonRuntime() owns first import so it can run off the UI
+        // thread. Install threads run only after setup already completed.
+        return linuxenvModule
     }
 
     /** Read a `zmux.linuxenv` path accessor (`rootfs_dir`, `home_dir`, …). */
@@ -238,27 +349,36 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
     }
 
     private fun createNewSession() {
-        val installed = detectInstalledLinux()
-        val newSession = if (installed != null) {
-            // A verified rootfs + executable PRoot: reopen the real guest
-            // shell directly. Guest binaries run through PRoot's ptrace mmap,
-            // so the host W^X execve ban never applies inside the guest.
-            ZmuxTerminalSession(
-                this,
-                installed.prootPath,
-                applicationInfo.nativeLibraryDir,
-                installed.rootfsDir,
-                installed.homeDir,
-            )
-        } else {
-            ZmuxTerminalSession(this)
-        }
+        // Python startup/detection may still be running. Never block the UI
+        // thread on filesystem/Python checks: open a local shell now, then
+        // promote that tab to PRoot when detection confirms a guest install.
+        val newSession = ZmuxTerminalSession(this)
         sessions.add(newSession)
-        if (installed != null) {
-            statusPill.setState(StatusPillView.State.CONNECTED, "${installed.osName} via PRoot")
+        if (pythonRuntimeReady) {
+            statusPill.setState(StatusPillView.State.CONNECTING, "checking Linux")
+            Thread {
+                val installed = detectInstalledLinux()
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    val index = sessions.indexOf(newSession)
+                    if (installed != null && index >= 0) {
+                        replaceSessionWithLinuxAt(index, newSession, installed)
+                    } else {
+                        statusPill.setState(StatusPillView.State.CONNECTED, "local shell")
+                        showLegacyInstallNote(newSession)
+                    }
+                }
+            }.start()
+        } else if (pythonStartupInProgress.get()) {
+            // The initial local tab is auto-promoted in onPythonRuntimeReady().
+            // Additional tabs created during startup must wait there too; they
+            // are intentionally not auto-promoted to avoid surprising the user.
+            statusPill.setState(StatusPillView.State.CONNECTING, "starting python")
+        } else {
+            statusPill.setState(StatusPillView.State.CONNECTED, "local shell")
         }
         switchToSession(sessions.size - 1)
-        if (installed == null) showLegacyInstallNote(newSession)
+        if (!pythonRuntimeReady) showLegacyInstallNote(newSession)
     }
 
     /**
@@ -323,25 +443,22 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
         prootPath: String,
         osName: String,
     ) {
+        val rootfs = installedRootfsDir()
+        val home = guestHomeDir()
+        if (rootfs == null || home == null || !rootfs.isDirectory) {
+            appendTerminalLine(
+                bootstrapSession,
+                "\u001b[31m[ZMUX Error]\u001b[0m Guest rootfs is not a directory at the path " +
+                    "zmux.linuxenv reports: ${rootfs?.absolutePath ?: "<zmux.linuxenv unavailable>"}. " +
+                    "Run linux-setup again — a reinstall is safe and keeps your home directory."
+            )
+            return
+        }
+
         runOnUiThread {
             if (isFinishing || isDestroyed) return@runOnUiThread
             val index = sessions.indexOf(bootstrapSession)
             if (index < 0) return@runOnUiThread
-
-            // Never guess the guest location: ask the module that installed it.
-            // Reporting the path Python actually returned is what makes a
-            // layout regression diagnosable instead of mysterious.
-            val rootfs = installedRootfsDir()
-            val home = guestHomeDir()
-            if (rootfs == null || home == null || !rootfs.isDirectory) {
-                appendTerminalLine(
-                    bootstrapSession,
-                    "\u001b[31m[ZMUX Error]\u001b[0m Guest rootfs is not a directory at the path " +
-                        "zmux.linuxenv reports: ${rootfs?.absolutePath ?: "<zmux.linuxenv unavailable>"}. " +
-                        "Run linux-setup again — a reinstall is safe and keeps your home directory."
-                )
-                return@runOnUiThread
-            }
 
             // Stop the Android mksh process which waited for .setup_done, then
             // attach a fresh kernel PTY whose child is PRoot and guest /bin/sh.
@@ -455,6 +572,10 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
         Thread {
             try {
                 val py = Python.getInstance()
+                val pyLinuxenv = linuxenv()
+                    ?: throw IllegalStateException(
+                        "zmux.linuxenv could not be imported; the Python runtime is unavailable."
+                    )
                 val version = py.getModule("sys").get("version")
                     ?.toString()?.substringBefore(" ") ?: "unknown"
                 appendTerminalLine(zmuxSession, "${esc}[32m[Chaquopy]${esc}[0m Python $version engine activated!")
@@ -469,16 +590,8 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
                     }
                 }
 
-                // Shared accessor: imports the module once, hands it the
-                // authoritative libproot.so location (Chaquopy is not
-                // Kivy/python-for-android, so its legacy activity discovery
-                // cannot infer nativeLibraryDir) and adopts any pre-alignment
-                // install before the installer decides what to download.
+                // Shared accessor was imported once during preparePythonRuntime.
                 val nativeLibDir = applicationInfo.nativeLibraryDir
-                val pyLinuxenv = linuxenv()
-                    ?: throw IllegalStateException(
-                        "zmux.linuxenv could not be imported; the Python runtime is unavailable."
-                    )
                 pyLinuxenv.callAttr("install", progressCallback, osName)
                 pyLinuxenv.callAttr("install_guest_wrappers")
 
