@@ -273,9 +273,29 @@ class KotlinShellContractTests(unittest.TestCase):
 
     def test_guest_launcher_mirrors_python_guards(self) -> None:
         self.assertIn("ensureTallocCompat", self.linux_block)
-        self.assertIn("/etc/resolv.conf", self.linux_block)
+        # DNS must be written into the guest rootfs; the host
+        # /etc/resolv.conf must NEVER be bind-mounted anymore (it is often a
+        # 127.0.0.1 stub the PRoot guest cannot reach — the root cause of
+        # "Temporary failure resolving" and the apk add hang).
+        self.assertIn("ensureGuestResolvConf(rootfs)", self.linux_block)
+        self.assertNotIn('"/etc/resolv.conf:/etc/resolv.conf"', self.linux_block)
         self.assertIn("canRead()", self.linux_block)
         self.assertIn("canExecute()", self.linux_block)
+        # And the helper itself must carry public DNS fallbacks.
+        resolv_block = self._method_block(self.helper_src, "ensureGuestResolvConf")
+        self.assertIn("8.8.8.8", resolv_block)
+        self.assertIn("1.1.1.1", resolv_block)
+
+    def test_guest_prompt_is_branded_in_profile_d(self) -> None:
+        # The "localhost:~#" prompt came from distro defaults in /etc/profile
+        # overwriting our env PS1. We now drop a script in /etc/profile.d
+        # which both Alpine ash and Debian dash source *after* that default.
+        self.assertIn("ensureGuestPrompt(rootfs, osLabel)", self.linux_block)
+        prompt_block = self._method_block(self.helper_src, "ensureGuestPrompt")
+        self.assertIn("etc/profile.d", prompt_block)
+        self.assertIn("zmux-prompt.sh", prompt_block)
+        self.assertIn("ZMUX@", prompt_block)
+        self.assertNotIn("localhost:~", prompt_block)
 
     def test_installed_rootfs_auto_reopened_on_activity_recreate(self) -> None:
         self.assertIn("detectInstalledLinux()", self.activity_src)
