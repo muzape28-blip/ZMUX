@@ -527,6 +527,11 @@ def proot_env() -> dict:
     extra: dict = {
         "PATH": GUEST_PATH,
         "HOME": GUEST_HOME,
+        # Some Android kernels (esp. Android 14/15) deliver a fatal SIGSYS
+        # ("Bad system call") to proot's tracees — most visibly `apt update`
+        # on Debian — when proot uses its seccomp accelerator. Disabling it
+        # keeps glibc guests working; proot falls back to pure ptrace.
+        "PROOT_NO_SECCOMP": "1",
     }
     if _is_android():
         lib_dir = native_library_dir() or ""
@@ -664,34 +669,58 @@ def build_interactive_argv(host_cwd: Path) -> list:
 
 
 def ensure_user_home_layout() -> None:
-    """Create the persistent Alpine-facing workspace without touching files
-    a user has already customised.
+    """Create the persistent guest-facing workspace and a branded prompt.
 
-    ``HOME_DIR`` is bind-mounted as /root, so these files survive rootfs
-    repair/reinstall and APK upgrades. A profile is created only on first use;
-    existing user profiles always remain authoritative.
+    ``HOME_DIR`` is bind-mounted as /root for both Alpine and Debian, so these
+    files survive rootfs repair/reinstall and APK upgrades. The profile is
+    created on first use; an existing user profile keeps its other content but
+    any ZMUX-generated PS1 is refreshed so the branding stays consistent.
     """
     HOME_DIR.mkdir(parents=True, exist_ok=True)
     (HOME_DIR / "projects").mkdir(parents=True, exist_ok=True)
     profile = HOME_DIR / ".profile"
+    os_name = installed_os() or "linux"
+    # Colour the ZMUX brand ember and the path teal. mksh/sh inside PRoot
+    # handles raw ANSI escapes fine; \[ \] markers are a bash/readline thing
+    # and show as literal junk under some shells.
+    ps1_line = (
+        "export PS1='"
+        "\\033[1;38;5;202mZMUX@" + os_name +
+        "\\033[0m:\\033[38;5;80m\\w"
+        "\\033[0m$ '"
+    )
+    marker = "export PS1='\\033[1;38;5;202mZMUX@"
+    legacy_markers = (
+        "export PS1='zmux@alpine:",  # ZMUX < 0.1.x
+        "export PS1='zmux@linux:",
+    )
     if not profile.exists():
         profile.write_text(
             "# Created by ZMUX. This file is yours to customise.\n"
-            "export PS1='zmux@alpine:\\w$ '\n"
-            "mkdir -p \"$HOME/projects\"\n",
+            f"{ps1_line}\n"
+            'mkdir -p "$HOME/projects"\n',
             encoding="utf-8",
         )
-    else:
-        # Migrate only the exact profile line emitted by the previous ZMUX
-        # build. A literal `$` is intentional: PRoot presents uid 0 inside
-        # its guest, but ZMUX must not imply Android-root privilege with `#`.
-        try:
-            old = profile.read_text(encoding="utf-8")
-            legacy = "export PS1='zmux@alpine:\\w\\$ '"
-            if legacy in old:
-                profile.write_text(old.replace(legacy, "export PS1='zmux@alpine:\\w$ '"), encoding="utf-8")
-        except OSError:
-            pass
+        return
+    try:
+        lines = profile.read_text(encoding="utf-8").splitlines()
+        out = []
+        replaced = False
+        for line in lines:
+            if line.startswith("export PS1=") and (
+                marker in line or any(m in line for m in legacy_markers)
+            ):
+                if not replaced:
+                    out.append(ps1_line)
+                    replaced = True
+                # drop stale duplicate ZMUX PS1 lines
+                continue
+            out.append(line)
+        if not replaced:
+            out.append(ps1_line)
+        profile.write_text("\n".join(out) + "\n", encoding="utf-8")
+    except OSError:
+        pass
 
 
 def interactive_env() -> dict:
@@ -699,7 +728,7 @@ def interactive_env() -> dict:
 
     proot_env() gives PATH/HOME/LD_LIBRARY_PATH (the loader contract for
     Android); TERM + LANG make TUI programs (vim/htop/less) render correctly
-    and set a friendly root prompt inside Alpine.
+    and set a friendly branded prompt inside the guest.
     """
     ensure_user_home_layout()
     env = proot_env()
@@ -707,10 +736,15 @@ def interactive_env() -> dict:
     env["LANG"] = "C.UTF-8"
     env["SHELL"] = "/bin/sh"
     # Keep the product boundary visible without pretending this is Android
-    # root. The guest is a normal Alpine userland rooted at its own /.
+    # root. The guest is a normal Linux userland rooted at its own /.
     env["USER"] = "zmux"
     env["LOGNAME"] = "zmux"
-    env["PS1"] = "zmux@alpine:\\w$ "
+    os_name = installed_os() or "linux"
+    env["PS1"] = (
+        "\\033[1;38;5;202mZMUX@" + os_name +
+        "\\033[0m:\\033[38;5;80m\\w"
+        "\\033[0m$ "
+    )
     return env
 
 
@@ -1078,6 +1112,42 @@ def _bootstrap(root: Path, os_name: str) -> None:
             release.write_text(f"{ALPINE_VERSION}\n", encoding="utf-8")
     elif not (etc / "debian_version").is_file():
         raise RuntimeError("Debian rootfs is missing /etc/debian_version after extraction")
+
+    if os_name == "debian":
+        # proot-distro's Debian minbase intentionally ships without
+        # /etc/apt/sources.list, so a bare `apt update` has no repos to
+        # fetch and fails. Provide the standard Bookworm deb.debian.org
+        # suite (main + updates + security). apt verifies Release files
+        # against the keyring bundled in the rootfs; no --allow-unauthenticated
+        # is used.
+        apt_dir = etc / "apt"
+        sources_dir = apt_dir / "sources.list.d"
+        sources_dir.mkdir(parents=True, exist_ok=True)
+        (apt_dir / "sources.list").write_text(
+            f"deb http://deb.debian.org/debian {DEBIAN_RELEASE} main\n"
+            f"deb http://deb.debian.org/debian {DEBIAN_RELEASE}-updates main\n"
+            f"deb http://security.debian.org/debian-security "
+            f"{DEBIAN_RELEASE}-security main\n",
+            encoding="utf-8",
+        )
+        # apt inside proot needs a few writable state/cache dirs that a
+        # stripped minbase may not include.
+        for sub in ("apt/apt.conf.d", "apt/preferences.d",
+                    "apt/trusted.gpg.d", "apt/sources.list.d"):
+            (etc / sub).mkdir(parents=True, exist_ok=True)
+        for sub in ("var/lib/dpkg", "var/lib/apt/lists/partial",
+                    "var/cache/apt/archives/partial", "var/log/apt"):
+            (root / sub).mkdir(parents=True, exist_ok=True)
+        # apt drops privileges to the _apt user when fetching via http; that
+        # uid does not exist inside a stripped minbase, which makes downloads
+        # fail with "Could not open lock file / permission denied". Tell apt
+        # to stay as root inside PRoot.
+        apt_conf = etc / "apt/apt.conf.d/99zmux"
+        apt_conf.write_text(
+            'APT::Sandbox::User "root";\n'
+            'Acquire::Languages "none";\n',
+            encoding="utf-8",
+        )
 
     # DNS: prefer the host's resolv.conf; fall back to public resolvers.
     host_resolv = Path("/etc/resolv.conf")

@@ -48,7 +48,7 @@ public class TerminalSessionHelper {
             fw.write("echo ''\n");
             fw.write("echo '(Type " + esc + "[34mlinux-setup" + esc + "[0m to install Alpine or Debian)'\n");
             fw.write("echo '" + esc + "[33m=================================================" + esc + "[0m'\n");
-            fw.write("export PS1='" + esc + "[32mzmux" + esc + "[0m~" + esc + "[34m:" + esc + "[0m$ '\n");
+            fw.write("export PS1='" + esc + "[1;38;5;202mZMUX@local" + esc + "[0m:" + esc + "[38;5;80m\\w" + esc + "[0m$ '\n");
             fw.write("alias ls='ls --color=auto'\n");
             fw.write("alias clear='clear; printf \"\\033[3J\"'\n");
             // Android 10+ W^X: files/bin/* can never be execve()'d directly, so
@@ -285,6 +285,22 @@ public class TerminalSessionHelper {
         args.add("/bin/sh");
         args.add("-l");
 
+        // Identify the guest from its marker so the fallback prompt is branded
+        // per OS. The persistent /root/.profile (written by zmux.linuxenv) is
+        // authoritative when present; this env value only covers sessions where
+        // profile sourcing is skipped.
+        String osLabel = "linux";
+        java.io.File marker = new java.io.File(rootfs, "etc/.zmux-rootfs");
+        try {
+            if (marker.isFile()) {
+                String value = new String(java.nio.file.Files.readAllBytes(marker.toPath()),
+                        java.nio.charset.StandardCharsets.UTF_8).trim().toLowerCase();
+                if (!value.isEmpty()) osLabel = value;
+            }
+        } catch (Exception ignored) {
+        }
+        String ps1 = "\033[1;38;5;202mZMUX@" + osLabel + "\033[0m:\033[38;5;80m\\w\033[0m$ ";
+
         String[] env = new String[] {
             "HOME=/root",
             "USER=zmux",
@@ -293,10 +309,13 @@ public class TerminalSessionHelper {
             "TERM=xterm-256color",
             "LANG=C.UTF-8",
             "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-            "PS1=zmux@linux:\\w$ ",
+            "PS1=" + ps1,
             "LD_LIBRARY_PATH=" + ldLibraryPath,
             "PROOT_LOADER=" + loader,
             "PROOT_TMP_DIR=" + cache.getAbsolutePath(),
+            // Avoid SIGSYS ("Bad system call") inside apt on kernels whose
+            // seccomp filter rejects proot's accelerator (Android 14/15).
+            "PROOT_NO_SECCOMP=1",
         };
         return new TerminalSession(
             prootPath,
