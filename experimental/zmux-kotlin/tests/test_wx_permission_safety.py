@@ -445,12 +445,18 @@ def load_tests(loader, tests, pattern):  # noqa: ARG001 - unittest protocol
     Python runtime disagree about — so they must never be skipped just because
     a workflow step was not added. ``make test`` also runs them on their own.
     """
-    tests.addTests(
-        loader.discover(
-            start_dir=str(Path(__file__).resolve().parent),
-            pattern="test_app_dir_alignment.py",
-        )
+    sibling = loader.discover(
+        start_dir=str(Path(__file__).resolve().parent),
+        pattern="test_app_dir_alignment.py",
     )
+    if sibling.countTestCases() == 0:
+        # unittest discovery is silent about a missing/renamed file, which would
+        # turn this hook into a green run that verifies nothing.
+        raise RuntimeError(
+            "tests/test_app_dir_alignment.py loaded zero gates; refusing to report "
+            "a passing run without the APP_DIR alignment checks."
+        )
+    tests.addTests(sibling)
     return tests
 
 

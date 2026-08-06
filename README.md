@@ -58,8 +58,58 @@ Gejala lama saat aplikasi ditutup lalu dibuka lagi:
 **Gate pengujian baru** — `tests/test_wx_permission_safety.py` (15 gates): simulasi runtime Android pada interpreter bersih, emulasi resolusi mksh, *eksekusi byte-asli `.zmuxrc` yang diekstrak dari sumber Java* di bawah `bash` dengan direktori `bin` berisi jebakan (negatif-kontrol ikut membuktikan layout lama pasti menembak jebakan), dan kontrak statik kode Kotlin/Java yang terpasang.
 
 ```bash
-make test   # 9/9 gate protokol + 8/8 installer + 15/15 W^X safety — semua hijau
+make test   # 9/9 protokol + 8/8 installer + 15/15 W^X + 23/23 APP_DIR — semua hijau
 ```
+
+---
+
+## 📍 Perbaikan "Rootfs path disappeared" (APP_DIR Chaquopy vs `filesDir`)
+
+Gejala: `linux-setup` sukses total (checksum terverifikasi, `rootfs installed and verified
+successfully!`), tetapi layar langsung menampilkan:
+
+```
+[Chaquopy Error] Rootfs path disappeared before PRoot launch:
+/data/user/0/com.zmux.terminal.debug/files/linux/rootfs
+```
+
+**Akar masalah:** Chaquopy bukan python-for-android. Ia tidak pernah menyetel `ANDROID_PRIVATE`/
+`ANDROID_ARGUMENT`/`ANDROID_APP_PATH`, dan mengekstrak sumber Python aplikasi ke
+`<filesDir>/chaquopy/AssetFinder/app`. Akibatnya `zmux.paths.resolve_app_dir()` jatuh ke langkah
+`__file__` (`Path(__file__).parent.parent`), menemukan direktori ekstraksi itu — yang memang
+*writable* — lalu memakainya sebagai `APP_DIR`. Rootfs terpasang di
+`<AssetFinder>/linux/rootfs`, sementara `ZmuxTerminalActivity` mencari di `filesDir`. Ketidakcocokan
+yang sama berlaku untuk **semua** turunan `APP_DIR`: wrapper `bin`, `.zmux_auth_token` (dibaca
+`ZmuxBackendLocator`), `cache`, dan `logs`.
+
+**Perbaikan (satu sumber kebenaran, Kotlin = host yang berwenang):**
+1. **Kontrak `APP_DIR` (Kotlin)** — `ZmuxTerminalActivity.onCreate` mengekspor
+   `Os.setenv("ANDROID_PRIVATE", filesDir, true)` **sebelum** `Python.start()` dan sebelum impor
+   modul `zmux` pertama (`APP_DIR` diresolve saat *import*). Efek samping positif: penjaga W^X
+   (`android_exec_blocked()`) yang sebelumnya diam-diam mati di Chaquopy kini aktif.
+2. **Tidak ada tebakan path di Kotlin** — `launchLinuxSession()` dan `detectInstalledLinux()`
+   meminta `zmux.linuxenv.rootfs_dir()` / `home_dir()`. Pesan galat kini mencetak path yang
+   benar-benar dikembalikan Python, bukan literal buatan tangan.
+3. **Jaring pengaman Python** — `resolve_app_dir()` menolak pohon aset Chaquopy sebagai root
+   runtime; tanpa ekspor host pun `APP_DIR` jatuh ke `HOME` (= `filesDir` di Chaquopy). Jalur p4a
+   (`ANDROID_ARGUMENT`/`ANDROID_APP_PATH`) dan desktop/CI tidak berubah.
+4. **Migrasi instalasi lama** — `linuxenv.migrate_legacy_install()` mengadopsi rootfs yang
+   terdampar di pohon AssetFinder lewat *rename* (satu filesystem, O(1) — tidak pernah menyalin di
+   UI thread), menggabungkan isi `home` lama tanpa menimpa berkas yang sudah ada, membersihkan
+   direktori kosong, dan melaporkan apa pun yang sengaja tidak disentuh. Dipanggil saat startup dan
+   di awal `install()`.
+5. **Kepemilikan berkas di `files/bin`** — karena `APP_DIR` kini sama dengan `filesDir`, generator
+   wrapper Python dan skrip bootstrap Java menulis ke direktori yang sama; skrip host diganti nama
+   menjadi `zmux-linux-setup` sehingga wrapper `linux-setup` bikinan Python tidak bisa lagi
+   menimpanya.
+
+**Gate pengujian baru** — `tests/test_app_dir_alignment.py` (23 gates): reproduksi layout Chaquopy
+apa adanya (probe interpreter bersih dengan `files/chaquopy/AssetFinder/app`), prioritas
+`resolve_app_dir()`, kesetaraan seluruh path yang dikonsumsi Kotlin, migrasi instalasi lama, tabrakan
+nama berkas `files/bin`, serta kontrak statik sumber Kotlin (tanpa literal `linux/rootfs`, path dari
+`linuxenv`, urutan `Os.setenv` sebelum `Python.start`). Suite ini juga ikut dijalankan otomatis dari
+`tests/test_wx_permission_safety.py` (protokol `load_tests`, gagal keras bila filenya hilang),
+sehingga langkah CI yang sudah ada tetap memverifikasinya.
 
 ---
 
