@@ -53,12 +53,10 @@ INTERFACE = "com.termux.terminal.TerminalSessionClient"
 # different textual shape. We list them here so the guard still considers the
 # interface satisfied. Keep in sync with the activity — this is a short,
 # human-curated allow list, not a free pass.
-OVERRIDES_EXPECTED_BUT_NOT_FUN = {
-    # All callback methods in the 0.118.0 interface are written as
-    # `override fun <name>(...) = Unit` in the activity, so this set is empty
-    # today. It exists so future single-line/expression-body overrides can be
-    # accounted for without weakening the check.
-}
+# NOTE: an empty set must be written as set(), NOT {}. In Python `{}` with
+# only comments inside is an empty dict, and `set | dict` raises
+# TypeError at runtime.
+OVERRIDES_EXPECTED_BUT_NOT_FUN: set[str] = set()
 
 
 def _gradle_root() -> Path:
