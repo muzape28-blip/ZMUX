@@ -126,9 +126,18 @@ object ZmuxTheme {
                 slots[IDX_BACKGROUND] = BG
                 slots[IDX_CURSOR] = EMBER
             }
-            // Tell the renderer the palette changed — this is the missing
-            // call that made earlier attempts look like they did nothing.
-            session?.onColorsChanged()
+            // Tell the renderer the palette changed. onColorsChanged() is
+            // package-private in com.termux.terminal, so call it reflectively
+            // to stay compatible across Termux versions. If it isn't present
+            // the subsequent view.invalidate() in applyToView still forces a
+            // redraw with the new palette.
+            session?.let {
+                runCatching {
+                    val m = it.javaClass.getDeclaredMethod("onColorsChanged")
+                    m.isAccessible = true
+                    m.invoke(it)
+                }
+            }
             true
         }.getOrDefault(false)
     }
