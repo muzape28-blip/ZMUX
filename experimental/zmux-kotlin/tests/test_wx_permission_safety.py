@@ -435,5 +435,30 @@ class LocalShellRcEmulationTests(unittest.TestCase):
             temp.cleanup()
 
 
+def load_tests(loader, tests, pattern):  # noqa: ARG001 - unittest protocol
+    """Also run the APP_DIR alignment gates from this entry point.
+
+    CI (.github/workflows/ci.yml) invokes the test files by name, and that
+    workflow is not always editable from the branch that adds a suite. The
+    APP_DIR alignment gates in ``tests/test_app_dir_alignment.py`` guard the
+    same production failure class as this file — a path the Kotlin host and the
+    Python runtime disagree about — so they must never be skipped just because
+    a workflow step was not added. ``make test`` also runs them on their own.
+    """
+    sibling = loader.discover(
+        start_dir=str(Path(__file__).resolve().parent),
+        pattern="test_app_dir_alignment.py",
+    )
+    if sibling.countTestCases() == 0:
+        # unittest discovery is silent about a missing/renamed file, which would
+        # turn this hook into a green run that verifies nothing.
+        raise RuntimeError(
+            "tests/test_app_dir_alignment.py loaded zero gates; refusing to report "
+            "a passing run without the APP_DIR alignment checks."
+        )
+    tests.addTests(sibling)
+    return tests
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

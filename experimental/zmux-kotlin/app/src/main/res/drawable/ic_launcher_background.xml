@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Adaptive-icon background layer. Charcoal tile that matches the app's
+     surface palette so the green Z pops. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <solid android:color="#12101A" />
+</shape>

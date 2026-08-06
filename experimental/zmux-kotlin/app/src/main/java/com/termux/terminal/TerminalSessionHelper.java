@@ -18,8 +18,10 @@ public class TerminalSessionHelper {
      *      /system/bin/clear toybox applet — dead-ends in "Permission
      *      denied". With a system-only PATH every toybox command resolves
      *      normally.
-     *   2. Reach files/bin/linux-setup through `sh <path>` (an interpreter
-     *      *reads* the script; no exec permission is needed).
+     *   2. Reach files/bin/zmux-linux-setup through `sh <path>` (an interpreter
+     *      *reads* the script; no exec permission is needed). The `zmux-`
+     *      prefix keeps this host-owned script clear of the wrapper names
+     *      zmux.paths generates into the same directory.
      */
     public static TerminalSession createLocalSession(TerminalSessionClient client, String filesDir) {
         java.io.File dir = new java.io.File(filesDir);
@@ -53,10 +55,19 @@ public class TerminalSessionHelper {
             // run the setup script through the `sh` interpreter, which only
             // needs to *read* the file. This is the only files/bin reference
             // allowed in this rc — everything else resolves against /system.
-            fw.write("alias linux-setup='sh " + shellQuote(binDir.getAbsolutePath() + "/linux-setup") + "'\n");
+            //
+            // The filename is deliberately host-owned and distinct from every
+            // name in zmux.command_registry.WRAPPER_COMMANDS. Now that APP_DIR
+            // is aligned with filesDir, zmux.paths.ensure_cli_wrappers() writes
+            // its generated wrappers into this very directory; sharing the name
+            // "linux-setup" would let the Python wrapper (which needs a
+            // `python` on PATH that Chaquopy does not provide) replace this
+            // menu. Gate: KotlinHostFileOwnershipTests in
+            // tests/test_app_dir_alignment.py.
+            fw.write("alias linux-setup='sh " + shellQuote(binDir.getAbsolutePath() + "/zmux-linux-setup") + "'\n");
             fw.close();
 
-            java.io.File setup = new java.io.File(binDir, "linux-setup");
+            java.io.File setup = new java.io.File(binDir, "zmux-linux-setup");
             java.io.FileWriter fws = new java.io.FileWriter(setup);
             fws.write("#!/system/bin/sh\n");
             fws.write("echo '" + esc + "[33m=================================================" + esc + "[0m'\n");
