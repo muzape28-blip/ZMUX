@@ -23,7 +23,13 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from zmux.paths import BIN_DIR, HOME_DIR, legacy_user_packages_pythonpath
+from zmux.paths import (
+    APP_DIR,
+    BIN_DIR,
+    HOME_DIR,
+    android_exec_blocked,
+    legacy_user_packages_pythonpath,
+)
 
 #: Directories always present on PATH, after BIN_DIR. On Android the inherited
 #: PATH is frequently minimal or absent, which makes basic utilities fail with
@@ -54,16 +60,32 @@ ANDROID_PASSTHROUGH = (
 
 
 def build_path(extra: tuple = ()) -> str:
-    """Return a de-duplicated PATH: BIN_DIR, then system dirs, then inherited."""
+    """Return a de-duplicated PATH: BIN_DIR, then system dirs, then inherited.
+
+    Under Android's W^X rule (:func:`zmux.paths.android_exec_blocked`) BIN_DIR
+    is *omitted*: execve() of app-private files is kernel-denied, so a PATH
+    entry pointing at the generated wrappers could only resolve commands into
+    guaranteed ``Permission denied`` errors (e.g. a child ``/system/bin/sh``
+    resolving ``clear`` to the ZMUX wrapper instead of the toybox applet).
+    On desktop/CI the wrappers execute normally and stay first on PATH.
+    """
     seen: set = set()
     parts: list = []
     inherited = os.environ.get("PATH", "")
+    blocked = android_exec_blocked()
+    head = () if blocked else (str(BIN_DIR),)
+    app_prefix = str(APP_DIR) + os.path.sep
     for entry in (
-        str(BIN_DIR),
+        *head,
         *extra,
         *SYSTEM_PATHS,
         *(inherited.split(os.pathsep) if inherited else []),
     ):
+        if blocked and entry and (entry == str(BIN_DIR) or entry.startswith(app_prefix)):
+            # An inherited entry into the non-executable app sandbox can only
+            # manufacture "Permission denied" — drop it no matter how it got
+            # in (stale prepend, embedding host, hand-built environment).
+            continue
         if entry and entry not in seen:
             seen.add(entry)
             parts.append(entry)

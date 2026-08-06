@@ -26,7 +26,7 @@ import threading
 from pathlib import Path
 from typing import Optional
 
-from zmux.paths import BIN_DIR, HOME_DIR, display_path
+from zmux.paths import HOME_DIR, display_path
 
 
 LEGACY_REST_EXECUTOR = True
@@ -109,28 +109,12 @@ class TerminalSession:
         env["TERM"] = "xterm-256color"
         env["LANG"] = "C.UTF-8"
         env["LC_ALL"] = "C.UTF-8"
-        # --- PATH construction ---------------------------------------------------
-        # On Android the inherited os.environ may lack a usable PATH, causing
-        # basic system commands (mkdir, ls, cat, ...) to fail with "Permission
-        # denied" or "not found".  We therefore always include the standard
-        # Android system binary directories *before* prepending BIN_DIR so that
-        # both ZMUX wrappers and real system utilities are reachable.
-        _SYSTEM_PATHS = [
-            "/system/bin",
-            "/system/xbin",
-            "/vendor/bin",
-            "/sbin",
-        ]
-        path = env.get("PATH", "")
-        # Deduplicate while preserving order: BIN_DIR first, then system dirs,
-        # then any pre-existing PATH entries.
-        seen: set = {str(BIN_DIR)}  # BIN_DIR is always first, skip duplicates
-        parts: list = [str(BIN_DIR)]
-        for p in _SYSTEM_PATHS + (path.split(os.pathsep) if path else []):
-            if p and p not in seen:
-                seen.add(p)
-                parts.append(p)
-        env["PATH"] = os.pathsep.join(parts)
+        # PATH construction is centralised in zmux.env.build_path: it adds the
+        # system binary directories and, under Android's W^X rule, *omits*
+        # BIN_DIR — an app-private PATH entry can only resolve commands into
+        # kernel-denied execve() calls ("Permission denied").
+        from zmux.env import build_path
+        env["PATH"] = build_path()
         # Legacy zpip packages remain importable for REST/PythonShell
         # compatibility. The product package workflow is Alpine apk + venv/pip.
         from zmux.paths import legacy_user_packages_pythonpath

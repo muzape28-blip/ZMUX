@@ -35,6 +35,10 @@ jobs:
         working-directory: ./experimental/zmux-kotlin
         run: PYTHONDONTWRITEBYTECODE=1 python3 tests/test_linuxenv.py
 
+      - name: Run W^X / 'Permission denied' safety gates
+        working-directory: ./experimental/zmux-kotlin
+        run: PYTHONDONTWRITEBYTECODE=1 python3 tests/test_wx_permission_safety.py
+
   build-android-apk:
     name: Build Android Kotlin Native UI APK
     runs-on: ubuntu-latest
