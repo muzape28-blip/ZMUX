@@ -217,13 +217,18 @@ public class TerminalSessionHelper {
             String prootPath,
             String nativeLibraryDir,
             String rootfsDir,
-            String homeDir) {
+            String homeDir,
+            String osName) {
         java.io.File rootfs = new java.io.File(rootfsDir);
         java.io.File home = new java.io.File(homeDir);
         java.io.File cache = new java.io.File(filesDir, "cache");
         home.mkdirs();
         new java.io.File(home, "projects").mkdirs();
         cache.mkdirs();
+
+        // Use OS-specific PS1: zmux@alpine:$ or zmux@debian:$
+        // Fallback to osName if null/blank, then to "linux" as last resort
+        String promptHost = (osName != null && !osName.isBlank()) ? osName : "linux";
 
         java.util.List<String> args = new java.util.ArrayList<>(java.util.Arrays.asList(
             "--kill-on-exit",
@@ -293,7 +298,7 @@ public class TerminalSessionHelper {
             "TERM=xterm-256color",
             "LANG=C.UTF-8",
             "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-            "PS1=zmux@linux:\\w$ ",
+            "PS1=zmux@" + promptHost + ":\\w$ ",
             "LD_LIBRARY_PATH=" + ldLibraryPath,
             "PROOT_LOADER=" + loader,
             "PROOT_TMP_DIR=" + cache.getAbsolutePath(),

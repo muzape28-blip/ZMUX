@@ -41,6 +41,9 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
     /** One rootfs operation at a time, even if terminal title sequences repeat. */
     private val installInProgress = AtomicBoolean(false)
 
+    /** Background thread for non-blocking Linux detection on startup. */
+    private var detectThread: Thread? = null
+
     /**
      * Chaquopy runs the installer on a worker thread. TerminalEmulator and
      * TerminalView are UI objects, so every byte returned by Python must cross
@@ -124,12 +127,41 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
 
         buildVirtualKeys()
 
-        // Auto-start one session. When a verified rootfs already exists we go
-        // straight back into Alpine/Debian — a recreated activity (app swiped
-        // away and re-opened) must never strand the user in the bootstrap
-        // shell again. The local mksh shell is now only the pre-install
-        // bootstrap whose one job is `linux-setup`.
+        // FIX ANR: Start with bootstrap shell immediately (non-blocking).
+        // Then detect installed Linux in background thread.
+        // This prevents "zmux tidak ada tanggapan" popup.
         createNewSession()
+
+        // Background Linux detection - run AFTER UI is ready
+        detectThread = Thread {
+            try {
+                // Small delay to let the UI settle first
+                Thread.sleep(300)
+                val installed = detectInstalledLinux()
+                if (installed != null && !isFinishing && !isDestroyed) {
+                    runOnUiThread {
+                        // Replace bootstrap session with real Linux session
+                        if (sessions.isNotEmpty()) {
+                            sessions[0].finishIfRunning()
+                            val linuxSession = ZmuxTerminalSession(
+                                this,
+                                installed.prootPath,
+                                applicationInfo.nativeLibraryDir,
+                                installed.rootfsDir,
+                                installed.homeDir,
+                                installed.osName,
+                            )
+                            sessions[0] = linuxSession
+                            activeSessionIndex = 0
+                            terminalView.attachSession(linuxSession.session)
+                            statusPill.setState(StatusPillView.State.CONNECTED, "${installed.osName} via PRoot")
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                // Detection failed silently - user stays in bootstrap shell
+            }
+        }.apply { start() }
     }
 
     /** What [detectInstalledLinux] found: everything needed to relaunch PRoot. */
@@ -249,6 +281,7 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
                 applicationInfo.nativeLibraryDir,
                 installed.rootfsDir,
                 installed.homeDir,
+                installed.osName,
             )
         } else {
             ZmuxTerminalSession(this)
@@ -352,6 +385,7 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
                 applicationInfo.nativeLibraryDir,
                 rootfs.absolutePath,
                 home.absolutePath,
+                osName,
             )
             sessions[index] = linuxSession
             activeSessionIndex = index
@@ -420,6 +454,9 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
     }
 
     override fun onDestroy() {
+        // Cancel background detection thread
+        detectThread?.interrupt()
+        detectThread = null
         for (s in sessions) {
             s.finishIfRunning()
         }
