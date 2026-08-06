@@ -168,11 +168,18 @@ def interface_methods(jar: Path) -> set[str]:
 
 
 def activity_overrides() -> set[str]:
+    """Return top-level (class-body) `override fun` names in the activity.
+
+    We deliberately only match methods indented by exactly four spaces —
+    that is, direct members of `class ZmuxTerminalActivity`. Nested
+    `object : ... { override fun ... }` (e.g. ProgressCallback) and other
+    inner classes would otherwise show up here, even though they have
+    nothing to do with TerminalSessionClient.
+    """
     if not ACTIVITY.is_file():
         return set()
     src = ACTIVITY.read_text(encoding="utf-8")
-    # Match `override fun <name>(` — single-token method names only.
-    return set(re.findall(r"override\s+fun\s+(\w+)\s*\(", src))
+    return set(re.findall(r"^    override\s+fun\s+(\w+)\s*\(", src, re.M))
 
 
 def _self_test() -> int:
@@ -241,8 +248,6 @@ def main() -> int:
     overrides = activity_overrides() | OVERRIDES_EXPECTED_BUT_NOT_FUN
 
     missing = required - overrides
-    extra = overrides - required
-
     if missing:
         print(
             "FAIL: ZmuxTerminalActivity is missing overrides required by "
@@ -251,20 +256,16 @@ def main() -> int:
         print("      Add them (or update this guard if they were renamed).")
         return 1
 
-    if extra:
-        print(
-            "FAIL: ZmuxTerminalActivity declares overrides that are NOT in "
-            f"{INTERFACE} ({TERMUX_VERSION}): {sorted(extra)}"
-        )
-        print(
-            "      This is the 'overrides nothing' class of bug — remove the "
-            "override or bump the Termux dependency deliberately."
-        )
-        return 1
-
+    # We intentionally do NOT fail on "extra" overrides. This activity also
+    # extends AppCompatActivity (onCreate, onDestroy, ...) and contains
+    # nested object overrides (e.g. ProgressCallback.invoke), none of which
+    # belong to TerminalSessionClient. The Kotlin compiler already rejects
+    # a truly bogus `override fun` at the build step with
+    # "overrides nothing", which is a stronger check than name matching
+    # here. Re-reporting them here only produced false positives.
     print(
-        f"OK: {len(required)} TerminalSessionClient overrides match the "
-        f"pinned Termux {TERMUX_VERSION} interface."
+        f"OK: {len(required)} TerminalSessionClient overrides all present; "
+        f"Termux {TERMUX_VERSION} interface satisfied."
     )
     return 0
 
