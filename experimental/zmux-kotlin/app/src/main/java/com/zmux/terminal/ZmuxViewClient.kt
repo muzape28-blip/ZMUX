@@ -24,8 +24,16 @@ class ZmuxViewClient(
 
     override fun onSingleTapUp(e: MotionEvent?) {
         view.requestFocus()
-        val imm = view.context.getSystemService(android.content.Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
-        imm.showSoftInput(view, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+        // FIX ANR: showSoftInput can block on low-end devices.
+        // Run on UI thread with post to prevent input dispatch timeout.
+        view.post {
+            try {
+                val imm = view.context.getSystemService(android.content.Context.INPUT_METHOD_SERVICE) as? android.view.inputmethod.InputMethodManager
+                imm?.showSoftInput(view, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+            } catch (e: Exception) {
+                // Ignore keyboard service errors silently
+            }
+        }
     }
 
     override fun shouldBackButtonBeMappedToEscape(): Boolean = false

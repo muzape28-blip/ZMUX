@@ -44,6 +44,9 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
     /** Background thread for non-blocking Linux detection on startup. */
     private var detectThread: Thread? = null
 
+    /** Chaquopy initialization state. */
+    private var chaquopyReady = false
+
     /**
      * Chaquopy runs the installer on a worker thread. TerminalEmulator and
      * TerminalView are UI objects, so every byte returned by Python must cross
@@ -98,10 +101,6 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
         // before Python.start() and before the first `zmux` module is imported.
         runCatching { android.system.Os.setenv("ANDROID_PRIVATE", filesDir.absolutePath, true) }
 
-        if (!Python.isStarted()) {
-            Python.start(AndroidPlatform(this))
-        }
-
         setContentView(R.layout.activity_terminal)
 
         terminalView = findViewById(R.id.terminal_view)
@@ -128,15 +127,23 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
         buildVirtualKeys()
 
         // FIX ANR: Start with bootstrap shell immediately (non-blocking).
-        // Then detect installed Linux in background thread.
+        // Chaquopy initialization and Linux detection run in background.
         // This prevents "zmux tidak ada tanggapan" popup.
         createNewSession()
 
-        // Background Linux detection - run AFTER UI is ready
+        // Background initialization: Chaquopy + Linux detection
+        // Runs AFTER UI is ready to prevent ANR during startup/input
         detectThread = Thread {
             try {
+                // Start Chaquopy (can take 1-3 seconds on low-end devices)
+                if (!Python.isStarted()) {
+                    Python.start(AndroidPlatform(this@ZmuxTerminalActivity))
+                }
+                chaquopyReady = true
+
                 // Small delay to let the UI settle first
-                Thread.sleep(300)
+                Thread.sleep(500)
+
                 val installed = detectInstalledLinux()
                 if (installed != null && !isFinishing && !isDestroyed) {
                     runOnUiThread {
@@ -144,7 +151,7 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
                         if (sessions.isNotEmpty()) {
                             sessions[0].finishIfRunning()
                             val linuxSession = ZmuxTerminalSession(
-                                this,
+                                this@ZmuxTerminalActivity,
                                 installed.prootPath,
                                 applicationInfo.nativeLibraryDir,
                                 installed.rootfsDir,
@@ -159,7 +166,7 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
                     }
                 }
             } catch (e: Exception) {
-                // Detection failed silently - user stays in bootstrap shell
+                // Chaquopy/Detection failed silently - user stays in bootstrap shell
             }
         }.apply { start() }
     }
