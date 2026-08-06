@@ -49,7 +49,7 @@ import urllib.request
 from pathlib import Path
 
 from zmux.net import get_ssl_context
-from zmux.paths import APP_DIR, CACHE_DIR, HOME_DIR
+from zmux.paths import APP_DIR, CACHE_DIR, HOME_DIR, legacy_app_dir_candidates
 
 #: App version marker for the User-Agent (mirrors zmux.zpip.APP_VERSION).
 APP_VERSION = "1.0.0"
@@ -180,7 +180,25 @@ def alpine_arch() -> str:
 
 
 def rootfs_dir() -> Path:
+    """Where the guest rootfs lives — the single source of truth.
+
+    The Android host must *ask* for this path (Kotlin:
+    ``linuxenv.callAttr("rootfs_dir")``) instead of rebuilding
+    ``filesDir/linux/rootfs`` by hand. A second, hand-written copy of the
+    layout is what produced "Rootfs path disappeared before PRoot launch":
+    Python installed into Chaquopy's asset tree while Kotlin looked under
+    ``filesDir``.
+    """
     return _ROOTFS_DIR
+
+
+def home_dir() -> Path:
+    """Host directory bound to the guest's ``/root`` (see :data:`HOME_BIND`).
+
+    Exposed for the same reason as :func:`rootfs_dir`: one owner for the
+    layout, asked over the bridge rather than duplicated in Kotlin.
+    """
+    return HOME_DIR
 
 
 def _normalise_os_name(os_name: str) -> str:
@@ -279,6 +297,121 @@ def status() -> str:
     proot_state = "ok" if proot else "missing libproot.so in nativeLibraryDir"
     return (f"{os_name.capitalize()} {installed_version()} ({alpine_arch()}) @ {rootfs_dir()}\n"
             f"proot: {proot_state}")
+
+
+# ---------------------------------------------------------------------------
+# Migration: installs made by a build with a mis-resolved APP_DIR
+# ---------------------------------------------------------------------------
+#: Directories the runtime creates itself; safe to remove from a stale APP_DIR
+#: once they are empty. Anything else in Chaquopy's asset tree belongs to
+#: Chaquopy (extracted Python sources) and is never touched.
+_LEGACY_PRUNABLE_DIRS = (
+    "linux",
+    "bin",
+    "cache",
+    "logs",
+    "staging",
+    "installed",
+    "user_packages",
+    "home",
+)
+
+
+def _merge_tree(source: Path, destination: Path) -> int:
+    """Move entries from ``source`` into ``destination`` without overwriting.
+
+    Only renames (``os.replace``) are used: both trees live on the same
+    app-private filesystem, so every move is O(1). An entry that cannot be
+    renamed is left in place rather than copied — this runs on the Android UI
+    thread during startup and must never turn into a multi-hundred-megabyte
+    copy. Existing destination entries always win; directories present on both
+    sides are merged recursively (``projects/`` is created eagerly by
+    ``zmux.paths``, so a plain top-level skip would strand the user's files).
+    Returns the number of entries moved.
+    """
+    moved = 0
+    try:
+        entries = sorted(source.iterdir())
+    except OSError:
+        return 0
+    destination.mkdir(parents=True, exist_ok=True)
+    for entry in entries:
+        target = destination / entry.name
+        if entry.is_dir() and not entry.is_symlink() and target.is_dir():
+            moved += _merge_tree(entry, target)
+            continue
+        if target.exists() or target.is_symlink():
+            continue
+        try:
+            os.replace(entry, target)
+        except OSError:
+            continue
+        moved += 1
+    with contextlib.suppress(OSError):
+        source.rmdir()  # only succeeds once the husk is empty
+    return moved
+
+
+def migrate_legacy_install() -> str:
+    """Adopt a rootfs installed by a build with a mis-resolved APP_DIR.
+
+    Builds before the APP_DIR alignment contract let ``resolve_app_dir()`` fall
+    back to Chaquopy's asset tree, so ``linux-setup`` installed the guest into
+    ``<filesDir>/chaquopy/AssetFinder/app/linux/rootfs`` while the Kotlin
+    launcher looked under ``<filesDir>/linux/rootfs``. Both live on the same
+    filesystem, so the install is *renamed* into place (instant) instead of
+    re-downloaded, and stale home files are merged in without overwriting.
+
+    Never raises and never copies: on any failure the user is told to run
+    ``linux-setup`` again, which reinstalls safely and keeps the user home.
+
+    Returns a human-readable note for the terminal, or ``""`` when there was
+    nothing to migrate (the normal case on a healthy device).
+    """
+    notes: list[str] = []
+    for legacy_app_dir in legacy_app_dir_candidates():
+        legacy_rootfs = legacy_app_dir / "linux" / "rootfs"
+        target = rootfs_dir()
+        if legacy_rootfs == target or not legacy_rootfs.is_dir():
+            continue
+        usable = _guest_regular_file(legacy_rootfs, "/bin/sh")
+        if is_installed():
+            # A working install at the live path wins; say where the orphan is
+            # instead of silently deleting hundreds of megabytes.
+            if usable:
+                notes.append(
+                    f"An older Linux install is still stored at {legacy_rootfs}; "
+                    "it is no longer used and can be deleted to free space."
+                )
+            continue
+        if not usable:
+            continue
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists():
+                # Only an empty/aborted husk can be here: is_installed() is False.
+                shutil.rmtree(target, ignore_errors=True)
+            os.replace(legacy_rootfs, target)
+        except OSError as error:
+            notes.append(
+                f"Found an older Linux install at {legacy_rootfs} but could not move it to "
+                f"{target} ({error}). Run linux-setup to reinstall — your home directory is kept."
+            )
+            continue
+        moved_home = _merge_tree(legacy_app_dir / "home", HOME_DIR)
+        for name in _LEGACY_PRUNABLE_DIRS:
+            with contextlib.suppress(OSError):
+                # Depth-first: `linux/.staging` first, then `linux` itself.
+                for husk in sorted((legacy_app_dir / name).rglob("*"), reverse=True):
+                    if husk.is_dir() and not husk.is_symlink():
+                        with contextlib.suppress(OSError):
+                            husk.rmdir()
+                (legacy_app_dir / name).rmdir()
+        detail = f" ({moved_home} home item(s) migrated)" if moved_home else ""
+        notes.append(
+            f"Recovered the previous Linux install from {legacy_rootfs} into {target}{detail}."
+        )
+    return "\n".join(notes)
 
 
 # ---------------------------------------------------------------------------
@@ -731,6 +864,17 @@ def install(progress=None, os_name="alpine") -> dict:
     """
     spec = _rootfs_spec(str(os_name))
     selected = str(spec["os_name"])
+
+    def report(text: str) -> None:
+        _emit_progress(progress if progress is not None else progress_sink, text)
+
+    # A rootfs stranded by an older build (Chaquopy asset tree) is adopted
+    # before anything is downloaded, so a re-run of `linux-setup` heals the
+    # layout instead of fetching the same guest a second time.
+    migration_note = migrate_legacy_install()
+    if migration_note:
+        report(migration_note + "\n")
+
     current = installed_os()
     if current == selected:
         return {
@@ -740,9 +884,6 @@ def install(progress=None, os_name="alpine") -> dict:
             "version": installed_version(),
             "path": str(rootfs_dir()),
         }
-
-    def report(text: str) -> None:
-        _emit_progress(progress if progress is not None else progress_sink, text)
 
     if current:
         report(f"Replacing installed {current.capitalize()} environment safely…\n")

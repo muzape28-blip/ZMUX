@@ -25,14 +25,41 @@ def _is_writable(path: Path) -> bool:
         return False
 
 
+def _is_chaquopy_asset_dir(path: Path) -> bool:
+    """True for Chaquopy's extracted asset tree (``.../chaquopy/AssetFinder/...``).
+
+    Chaquopy materialises the app's Python sources under
+    ``<filesDir>/chaquopy/AssetFinder/app`` and points ``__file__`` there. The
+    directory is writable, so the ``__file__``-relative fallback in
+    :func:`resolve_app_dir` used to adopt it as APP_DIR — putting the guest
+    rootfs, CLI wrappers, auth token, cache and logs inside an extraction area
+    the Android host knows nothing about (and that Chaquopy owns and may
+    re-extract on upgrade). The Kotlin host looks for all of them under
+    ``filesDir``, which is how a fully verified install still ended in
+    "Rootfs path disappeared before PRoot launch".
+
+    It is never a valid runtime root: the host contract (ANDROID_PRIVATE,
+    exported by the activity before ``Python.start()``) decides, and this guard
+    keeps the fallback honest if that export is ever missing.
+    """
+    parts = {part.lower() for part in path.parts}
+    return "chaquopy" in parts and "assetfinder" in parts
+
+
 def resolve_app_dir() -> Path:
     """
     Resolve the application directory based on runtime environment.
-    
+
     Priority:
-    1. ANDROID_PRIVATE / ANDROID_ARGUMENT / ANDROID_APP_PATH env vars (p4a webview bootstrap)
-    2. Fallback: project root (where main.py lives) for desktop development
-    3. Safe Android / POSIX writable fallbacks
+    1. ANDROID_PRIVATE / ANDROID_ARGUMENT / ANDROID_APP_PATH env vars. This is
+       the p4a webview bootstrap contract *and* the Chaquopy contract: the
+       Kotlin activity exports ANDROID_PRIVATE=filesDir before starting Python,
+       so both sides agree on one APP_DIR (see ZmuxTerminalActivity.onCreate).
+    2. Fallback: project root (where main.py lives) for desktop development —
+       unless that is Chaquopy's asset tree (:func:`_is_chaquopy_asset_dir`),
+       which is app-owned scratch space, not a runtime root.
+    3. Safe Android / POSIX writable fallbacks. On Android, Chaquopy sets HOME
+       to filesDir, so step 3 lands on the same directory as step 1.
     """
     for env_key in ("ANDROID_PRIVATE", "ANDROID_ARGUMENT", "ANDROID_APP_PATH"):
         val = os.environ.get(env_key)
@@ -42,7 +69,7 @@ def resolve_app_dir() -> Path:
                 return candidate
 
     default_root = Path(__file__).resolve().parent.parent
-    if _is_writable(default_root):
+    if not _is_chaquopy_asset_dir(default_root) and _is_writable(default_root):
         return default_root
 
     for candidate_str in (
@@ -105,6 +132,35 @@ for directory in ALL_RUNTIME_DIRS:
     except OSError:
         pass
 
+
+
+def legacy_app_dir_candidates() -> list[Path]:
+    """Directories a previous ZMUX build may have used as APP_DIR.
+
+    Only Chaquopy's asset tree qualifies today. Before the Kotlin host exported
+    ``ANDROID_PRIVATE`` (and before :func:`_is_chaquopy_asset_dir` existed),
+    :func:`resolve_app_dir` adopted ``<filesDir>/chaquopy/AssetFinder/app``, so
+    devices that ran ``linux-setup`` on such a build have a complete, verified
+    rootfs stranded there. :func:`zmux.linuxenv.migrate_legacy_install` uses
+    this list to adopt that install instead of asking for a re-download.
+
+    Existing directories only, never APP_DIR itself, de-duplicated.
+    """
+    candidates: list[Path] = []
+    for candidate in (
+        Path(__file__).resolve().parent.parent,
+        APP_DIR / "chaquopy" / "AssetFinder" / "app",
+    ):
+        if candidate == APP_DIR or candidate in candidates:
+            continue
+        if not _is_chaquopy_asset_dir(candidate):
+            continue
+        try:
+            if candidate.is_dir():
+                candidates.append(candidate)
+        except OSError:
+            continue
+    return candidates
 
 
 def legacy_package_paths() -> dict[str, Path]:

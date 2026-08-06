@@ -10,6 +10,7 @@ import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
 import com.termux.terminal.ZmuxTerminalSession
 import com.termux.terminal.TerminalSessionHelper
+import com.chaquo.python.PyObject
 import com.chaquo.python.Python
 import com.chaquo.python.android.AndroidPlatform
 import com.termux.view.TerminalView
@@ -77,7 +78,23 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        
+
+        // ---- APP_DIR alignment contract: this line must stay first ----------
+        // Chaquopy is not python-for-android: it exports none of the ANDROID_*
+        // variables and extracts the app's Python sources into
+        // <filesDir>/chaquopy/AssetFinder/app. zmux.paths.resolve_app_dir()
+        // then had no host signal at all and fell back to __file__, adopting
+        // that extraction directory as APP_DIR — so `linux-setup` installed a
+        // fully verified rootfs into <AssetFinder>/linux/rootfs while this
+        // activity looked under filesDir ("Rootfs path disappeared before PRoot
+        // launch"). The same mismatch hit every other APP_DIR child: bin
+        // wrappers, .zmux_auth_token (read by ZmuxBackendLocator), cache, logs.
+        //
+        // Exporting ANDROID_PRIVATE makes filesDir the one source of truth for
+        // both sides. APP_DIR is resolved at *import* time, so this must happen
+        // before Python.start() and before the first `zmux` module is imported.
+        runCatching { android.system.Os.setenv("ANDROID_PRIVATE", filesDir.absolutePath, true) }
+
         if (!Python.isStarted()) {
             Python.start(AndroidPlatform(this))
         }
@@ -123,16 +140,72 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
         val homeDir: String,
     )
 
+    /** Imported once by [linuxenv]; Chaquopy caches the module itself too. */
+    private var linuxenvModule: PyObject? = null
+
+    /** One-shot note from [linuxenv]'s legacy-install migration, or null. */
+    private var legacyInstallNote: String? = null
+
     /**
-     * Detect an already-installed, already-verified guest rootfs without
-     * touching the Python runtime. Mirrors linuxenv.installed_os():
-     * guest /bin/sh must resolve (busybox absolute links included) and the OS
-     * marker decides the flavour. PRoot must come from nativeLibraryDir — the
-     * only directory Android allows execve() from — so its own executable
-     * check also gates the launch.
+     * The `zmux.linuxenv` module, ready to answer path questions.
+     *
+     * Python (`zmux.paths.APP_DIR`) owns the runtime layout, so this activity
+     * *asks* for every directory instead of rebuilding it from [filesDir]. A
+     * second, hand-written copy of that layout is exactly what produced the
+     * "Rootfs path disappeared" mismatch, and a hard-coded fallback here would
+     * reintroduce it — so there is none: when Python is unavailable the caller
+     * degrades to the bootstrap shell and says why.
+     *
+     * Synchronised because the installer thread and the UI thread both use it;
+     * the migration inside must run exactly once.
+     */
+    @Synchronized
+    private fun linuxenv(): PyObject? {
+        linuxenvModule?.let { return it }
+        return runCatching {
+            val module = Python.getInstance().getModule("zmux.linuxenv")
+            // nativeLibraryDir is the only directory Android allows execve()
+            // from, and Chaquopy cannot discover it: hand it over before any
+            // path/proot query.
+            module.callAttr("set_native_library_dir", applicationInfo.nativeLibraryDir)
+            // Adopt a rootfs left behind by a pre-alignment build (it lives in
+            // Chaquopy's asset tree) instead of making the user download the
+            // guest a second time. Renames only — never a blocking copy.
+            legacyInstallNote = module.callAttr("migrate_legacy_install")
+                ?.toString()?.trim()?.takeIf { it.isNotEmpty() && it != "None" }
+            linuxenvModule = module
+            module
+        }.getOrNull()
+    }
+
+    /** Read a `zmux.linuxenv` path accessor (`rootfs_dir`, `home_dir`, …). */
+    private fun pythonPath(accessor: String): java.io.File? {
+        val module = linuxenv() ?: return null
+        val value = runCatching { module.callAttr(accessor)?.toString() }.getOrNull()
+        if (value.isNullOrBlank() || value == "None") return null
+        return java.io.File(value)
+    }
+
+    /** Guest rootfs location, exactly as `zmux.linuxenv.rootfs_dir()` reports it. */
+    private fun installedRootfsDir(): java.io.File? = pythonPath("rootfs_dir")
+
+    /** Host directory bound to the guest `/root`, per `zmux.linuxenv.home_dir()`. */
+    private fun guestHomeDir(): java.io.File? = pythonPath("home_dir")
+
+    /**
+     * Detect an already-installed, already-verified guest rootfs.
+     *
+     * The location comes from [installedRootfsDir]/[guestHomeDir] (i.e. from
+     * `zmux.linuxenv`), never from a path built here — that is the whole point
+     * of the alignment contract. The checks themselves mirror
+     * linuxenv.installed_os(): guest /bin/sh must resolve (busybox absolute
+     * links included) and the OS marker decides the flavour. PRoot must come
+     * from nativeLibraryDir — the only directory Android allows execve() from
+     * — so its own executable check also gates the launch.
      */
     private fun detectInstalledLinux(): InstalledLinux? {
-        val rootfs = java.io.File(filesDir, "linux/rootfs")
+        val rootfs = installedRootfsDir() ?: return null
+        val home = guestHomeDir() ?: return null
         if (!rootfs.isDirectory) return null
         if (!TerminalSessionHelper.guestRegularFile(rootfs, "bin/sh")) return null
 
@@ -155,7 +228,7 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
             osName = osName,
             prootPath = proot.absolutePath,
             rootfsDir = rootfs.absolutePath,
-            homeDir = java.io.File(filesDir, "home").absolutePath,
+            homeDir = home.absolutePath,
         )
     }
 
@@ -185,6 +258,24 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
             statusPill.setState(StatusPillView.State.CONNECTED, "${installed.osName} via PRoot")
         }
         switchToSession(sessions.size - 1)
+        if (installed == null) showLegacyInstallNote(newSession)
+    }
+
+    /**
+     * Tell the user, once, what happened to an install made by an older build.
+     *
+     * Only reached when no guest could be opened — either the stranded rootfs
+     * could not be renamed into place, or it was already superseded. The
+     * bootstrap rc clears the screen as its first command, so the note is
+     * posted after the banner has been drawn; printing it immediately would
+     * wipe it before it could be read.
+     */
+    private fun showLegacyInstallNote(session: ZmuxTerminalSession) {
+        val note = legacyInstallNote ?: return
+        legacyInstallNote = null
+        terminalView.postDelayed({
+            appendTerminalLine(session, "\u001b[33m[ZMUX]\u001b[0m ${note.replace("\n", "\r\n")}")
+        }, 900L)
     }
 
     private fun switchToSession(index: Int) {
@@ -237,11 +328,17 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
             val index = sessions.indexOf(bootstrapSession)
             if (index < 0) return@runOnUiThread
 
-            val rootfs = java.io.File(filesDir, "linux/rootfs")
-            if (!rootfs.isDirectory) {
+            // Never guess the guest location: ask the module that installed it.
+            // Reporting the path Python actually returned is what makes a
+            // layout regression diagnosable instead of mysterious.
+            val rootfs = installedRootfsDir()
+            val home = guestHomeDir()
+            if (rootfs == null || home == null || !rootfs.isDirectory) {
                 appendTerminalLine(
                     bootstrapSession,
-                    "\u001b[31m[Chaquopy Error]\u001b[0m Rootfs path disappeared before PRoot launch: $rootfs"
+                    "\u001b[31m[ZMUX Error]\u001b[0m Guest rootfs is not a directory at the path " +
+                        "zmux.linuxenv reports: ${rootfs?.absolutePath ?: "<zmux.linuxenv unavailable>"}. " +
+                        "Run linux-setup again — a reinstall is safe and keeps your home directory."
                 )
                 return@runOnUiThread
             }
@@ -254,7 +351,7 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
                 prootPath,
                 applicationInfo.nativeLibraryDir,
                 rootfs.absolutePath,
-                java.io.File(filesDir, "home").absolutePath,
+                home.absolutePath,
             )
             sessions[index] = linuxSession
             activeSessionIndex = index
@@ -372,20 +469,24 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
                     }
                 }
 
-                val linuxenv = py.getModule("zmux.linuxenv")
-                // This is the authoritative location for libproot.so. The
-                // Python engine is Chaquopy (not Kivy/python-for-android), so
-                // its legacy activity discovery cannot infer this directory.
+                // Shared accessor: imports the module once, hands it the
+                // authoritative libproot.so location (Chaquopy is not
+                // Kivy/python-for-android, so its legacy activity discovery
+                // cannot infer nativeLibraryDir) and adopts any pre-alignment
+                // install before the installer decides what to download.
                 val nativeLibDir = applicationInfo.nativeLibraryDir
-                linuxenv.callAttr("set_native_library_dir", nativeLibDir)
-                linuxenv.callAttr("install", progressCallback, osName)
-                linuxenv.callAttr("install_guest_wrappers")
+                val pyLinuxenv = linuxenv()
+                    ?: throw IllegalStateException(
+                        "zmux.linuxenv could not be imported; the Python runtime is unavailable."
+                    )
+                pyLinuxenv.callAttr("install", progressCallback, osName)
+                pyLinuxenv.callAttr("install_guest_wrappers")
 
                 // PyObject.get("key") is Python attribute access, not dict
                 // item access. Ask the module directly so the success banner
                 // reports the real installed guest/version on every Chaquopy release.
-                val installedOs = linuxenv.callAttr("installed_os").toString().ifBlank { osName }
-                val versionText = linuxenv.callAttr("installed_version").toString()
+                val installedOs = pyLinuxenv.callAttr("installed_os").toString().ifBlank { osName }
+                val versionText = pyLinuxenv.callAttr("installed_version").toString()
                     .takeIf { it.isNotBlank() }
                 val suffix = if (versionText == null) "" else " ($versionText)"
                 appendTerminalLine(
@@ -393,7 +494,7 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
                     "${esc}[32m[Chaquopy]${esc}[0m $installedOs$suffix rootfs installed and verified successfully!"
                 )
 
-                val proot = linuxenv.callAttr("proot_binary")?.toString()
+                val proot = pyLinuxenv.callAttr("proot_binary")?.toString()
                 if (proot.isNullOrBlank() || proot == "None") {
                     val expected = java.io.File(nativeLibDir, "libproot.so")
                     appendTerminalLine(
