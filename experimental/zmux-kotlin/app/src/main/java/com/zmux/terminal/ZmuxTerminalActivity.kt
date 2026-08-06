@@ -676,6 +676,7 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
     override fun onBell(session: TerminalSession) = Unit
     override fun onColorsChanged(session: TerminalSession) = Unit
     override fun onTerminalCursorStateChange(state: Boolean) = Unit
+    override fun setTerminalShellPid(session: TerminalSession, pid: Int) = Unit
     override fun getTerminalCursorStyle(): Int? = 0
 
     override fun logError(tag: String?, message: String?) = Unit

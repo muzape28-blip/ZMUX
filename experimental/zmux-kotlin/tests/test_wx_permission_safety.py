@@ -379,6 +379,18 @@ class KotlinShellContractTests(unittest.TestCase):
             PROJECT_ROOT / "app/src/main/res/layout/activity_terminal.xml"
         ).read_text(encoding="utf-8"))
 
+    def test_terminal_session_client_interface_is_fully_implemented(self) -> None:
+        # Termux TerminalSessionClient is an interface; missing any abstract
+        # method fails the Kotlin compile (the Build Debug APK step). The
+        # setTerminalShellPid callback was historically easy to forget.
+        for method in (
+            "onTextChanged", "onTitleChanged", "onSessionFinished",
+            "onCopyTextToClipboard", "onPasteTextFromClipboard",
+            "onBell", "onColorsChanged", "onTerminalCursorStateChange",
+            "setTerminalShellPid", "getTerminalCursorStyle",
+        ):
+            self.assertIn(method, self.activity_src, f"missing override: {method}")
+
     def test_installed_rootfs_auto_reopened_on_activity_recreate(self) -> None:
         self.assertIn("detectInstalledLinux()", self.activity_src)
         self.assertIn("etc/.zmux-rootfs", self.activity_src)

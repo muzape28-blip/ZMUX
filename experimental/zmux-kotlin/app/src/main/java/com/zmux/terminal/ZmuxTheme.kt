@@ -148,13 +148,9 @@ object ZmuxTheme {
         emulator: TerminalEmulator?,
         session: TerminalSession?,
     ) {
-        runCatching {
-            // Pin a real monospace typeface. The default Typeface.MONOSPACE
-            // is consistent across ROMs and is what Termux itself falls back
-            // to when no font.ttf is configured. Without this call the
-            // renderer uses whatever the view's XML style resolved to.
-            view.typeface = Typeface.MONOSPACE
-        }
+        // Pin a real monospace typeface. setTypeface is the public API used
+        // by Termux itself (TerminalView.setTypeface rebuilds the renderer).
+        view.setTypeface(Typeface.MONOSPACE)
         if (applyTo(emulator, session)) {
             view.invalidate()
         }
