@@ -65,14 +65,14 @@ jobs:
             gradle wrapper --gradle-version 8.7
           fi
           chmod +x ./gradlew
-          
-      - name: Verify Termux interface overrides
-        working-directory: ./experimental/zmux-kotlin
-        run: python3 tests/check_termux_interface.py    
-
+                    
       - name: Build Debug APK (assembleDebug)
         working-directory: ./experimental/zmux-kotlin
         run: ./gradlew :app:assembleDebug --stacktrace
+
+      - name: Verify Termux interface overrides
+        working-directory: ./experimental/zmux-kotlin
+        run: python3 tests/check_termux_interface.py
 
       - name: Upload Debug APK Artifact
         uses: actions/upload-artifact@v4
