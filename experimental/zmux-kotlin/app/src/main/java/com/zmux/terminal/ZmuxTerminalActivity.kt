@@ -126,8 +126,25 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
         terminalView.isFocusableInTouchMode = true
 
         terminalView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-            activeSession()?.let { it.onResize?.invoke(it.columns, it.rows) }
+            // Propagate the real pixel-based cell size to the PTY every time
+            // the view is laid out (first layout, rotation, keyboard show,
+            // tab switch). The Termux TerminalView.updateSize() computes
+            // cols/rows from the measured font metrics and calls
+            // session.updateSize() which issues TIOCSWINSZ on the PTY.
+            //
+            // This is the bug that made `apk add python3` look "broken":
+            // the session was created with cols=2000, attachSession() ran
+            // before the view had a non-zero size, so the PTY never learned
+            // the actual ~38-40 column phone width and line editing wrapped
+            // at the wrong place.
+            terminalView.updateSize()
         }
+
+        // Re-apply the size once the view hierarchy has been measured. The
+        // first attach happens before layout; without this post the child
+        // process keeps the constructor's default 80x24 even though the
+        // TerminalView knows the real geometry.
+        terminalView.post { terminalView.updateSize() }
 
         statusPill.setState(StatusPillView.State.CONNECTING, "starting shell")
 
@@ -256,6 +273,7 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
         sessions[index] = linuxSession
         activeSessionIndex = index
         terminalView.attachSession(linuxSession.session)
+        applyThemeToView(linuxSession.session)
         statusPill.setState(StatusPillView.State.CONNECTED, "${installed.osName} via PRoot")
         renderLocalTabs()
         terminalView.requestFocus()
@@ -325,9 +343,9 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
             val fromMarker = runCatching { marker.takeIf { it.isFile }?.readText()?.trim()?.lowercase() }
                 .getOrNull()
             when {
-                fromMarker in setOf("alpine", "debian") -> fromMarker!!
-                java.io.File(rootfs, "etc/alpine-release").isFile -> "alpine"
-                java.io.File(rootfs, "etc/debian_version").isFile -> "debian"
+                fromMarker == "alpine" -> "alpine"
+                // Compatibility with Alpine installs made before the marker.
+                fromMarker == null && java.io.File(rootfs, "etc/alpine-release").isFile -> "alpine"
                 else -> return null
             }
         }
@@ -398,11 +416,27 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
         }, 900L)
     }
 
+    private fun applyThemeToView(session: TerminalSession) {
+        // Apply the ZMUX palette, cursor colour and monospace typeface
+        // immediately on attach. Waiting for onTextChanged meant the first
+        // frame rendered with Termux's default colours (the same
+        // "changed colours but nothing happened" effect as Termux without
+        // a running session), so this runs on every attach — cheap, and it
+        // guarantees the palette is correct after rotation/resize too.
+        ZmuxTheme.applyToView(
+            terminalView,
+            TerminalSessionHelper.getEmulator(session),
+            session,
+        )
+        terminalView.invalidate()
+    }
+
     private fun switchToSession(index: Int) {
         if (index !in sessions.indices) return
         activeSessionIndex = index
         val s = sessions[index]
         terminalView.attachSession(s.session)
+        applyThemeToView(s.session)
         renderLocalTabs()
     }
 
@@ -473,6 +507,7 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
             sessions[index] = linuxSession
             activeSessionIndex = index
             terminalView.attachSession(linuxSession.session)
+            applyThemeToView(linuxSession.session)
             statusPill.setState(StatusPillView.State.CONNECTED, "$osName via PRoot")
             renderLocalTabs()
             terminalView.requestFocus()
@@ -548,17 +583,13 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
     override fun onTextChanged(changedSession: TerminalSession) {
         if (::terminalView.isInitialized) {
             terminalView.onScreenUpdated()
-            ZmuxTheme.applyTo(TerminalSessionHelper.getEmulator(changedSession))
         }
     }
 
     override fun onTitleChanged(changedSession: TerminalSession) {
         val title = changedSession.title ?: return
-        val osName = when (title) {
-            "INSTALL_ALPINE" -> "alpine"
-            "INSTALL_DEBIAN" -> "debian"
-            else -> return
-        }
+        if (title != "INSTALL_ALPINE") return
+        val osName = "alpine"
         val zmuxSession = sessions.find { it.session == changedSession } ?: return
 
         if (!installInProgress.compareAndSet(false, true)) {

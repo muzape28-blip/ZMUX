@@ -52,6 +52,10 @@ KOTLIN_ACTIVITY = (
     PROJECT_ROOT / "app" / "src" / "main" / "java" / "com" / "zmux" / "terminal"
     / "ZmuxTerminalActivity.kt"
 )
+KEY_CAP_VIEW = (
+    PROJECT_ROOT / "app" / "src" / "main" / "java" / "com" / "zmux" / "terminal"
+    / "widget" / "KeyCapView.kt"
+)
 
 _WRAPPER_PROBE = r"""
 import json, os, stat, sys
@@ -236,6 +240,7 @@ class KotlinShellContractTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.helper_src = JAVA_HELPER.read_text(encoding="utf-8")
         cls.activity_src = KOTLIN_ACTIVITY.read_text(encoding="utf-8")
+        cls.keycap_src = KEY_CAP_VIEW.read_text(encoding="utf-8")
         cls.local_block = cls._method_block(cls.helper_src, "createLocalSession")
         cls.linux_block = cls._method_block(cls.helper_src, "createLinuxSession")
 
@@ -287,15 +292,92 @@ class KotlinShellContractTests(unittest.TestCase):
         self.assertIn("1.1.1.1", resolv_block)
 
     def test_guest_prompt_is_branded_in_profile_d(self) -> None:
-        # The "localhost:~#" prompt came from distro defaults in /etc/profile
+        # The "localhost:~#" prompt came from Alpine's /etc/profile default
         # overwriting our env PS1. We now drop a script in /etc/profile.d
-        # which both Alpine ash and Debian dash source *after* that default.
-        self.assertIn("ensureGuestPrompt(rootfs, osLabel)", self.linux_block)
+        # which busybox ash sources *after* that default.
+        self.assertIn("ensureGuestPrompt(rootfs)", self.linux_block)
         prompt_block = self._method_block(self.helper_src, "ensureGuestPrompt")
         self.assertIn("etc/profile.d", prompt_block)
         self.assertIn("zmux-prompt.sh", prompt_block)
-        self.assertIn("ZMUX@", prompt_block)
+        self.assertIn("202mZMUX", prompt_block)
+        self.assertNotIn("ZMUX@", prompt_block)
         self.assertNotIn("localhost:~", prompt_block)
+
+    def test_setup_confirms_before_install_and_prompt_is_simple(self) -> None:
+        self.assertIn("Install Alpine now? [y/N]", self.local_block)
+        # Only one guest OS remains: no multi-option menu, no second OSC
+        # install title, no second package manager, and no @os prompt.
+        self.assertNotIn("Choose [", self.helper_src)
+        self.assertNotIn("INSTALL_", self.helper_src.replace("INSTALL_ALPINE", ""))
+        self.assertNotIn("ZMUX@", self.helper_src)
+        self.assertNotIn("apt-get", self.helper_src)
+
+    def test_pty_default_size_is_not_2000(self) -> None:
+        # The constructor's 5th argument is the initial column count. It was
+        # once 2000, which made `apk add python3` wrap the "3" onto a new
+        # line before the PTY was ever resized to the real phone width.
+        self.assertNotIn(", 2000,", self.helper_src)
+        self.assertIn(", 80,", self.helper_src)
+
+    def test_virtual_key_does_not_fire_on_touch_down(self) -> None:
+        # Regression: keys used to call onFire() in ACTION_DOWN, so a finger
+        # starting a horizontal scroll on the key bar immediately sent an
+        # arrow/character before the scroll started. A proper tap must fire
+        # only on ACTION_UP after the move stayed within touch slop.
+        self.assertIn("scaledTouchSlop", self.keycap_src)
+        self.assertIn("MotionEvent.ACTION_MOVE", self.keycap_src)
+        self.assertIn("dragCanceled", self.keycap_src)
+        self.assertIn("requestDisallowInterceptTouchEvent", self.keycap_src)
+        down_block = re.search(
+            r"MotionEvent\.ACTION_DOWN -> \{.*?\n\s*\}",
+            self.keycap_src,
+            re.S,
+        )
+        self.assertIsNotNone(down_block, "ACTION_DOWN block not found")
+        self.assertNotIn("onFire?.invoke()", down_block.group(0))
+        self.assertNotIn("onFire!!.invoke()", down_block.group(0))
+        up_block = re.search(
+            r"MotionEvent\.ACTION_UP -> \{.*?\n\s*\}",
+            self.keycap_src,
+            re.S,
+        )
+        self.assertIsNotNone(up_block, "ACTION_UP block not found")
+        self.assertIn("onFire?.invoke()", up_block.group(0))
+
+    def test_layout_changes_propagate_pty_size(self) -> None:
+        # The onLayoutChangeListener must call TerminalView.updateSize() so
+        # session.updateSize()/TIOCSWINSZ fires every time the view geometry
+        # changes (first layout, rotation, IME resize). The dead onResize
+        # callback must be gone — it was never assigned to anything.
+        on_create = re.search(
+            r"override fun onCreate\(.*?^    \}", self.activity_src, re.S | re.M
+        )
+        self.assertIsNotNone(on_create)
+        block = on_create.group(0)
+        self.assertIn("terminalView.updateSize()", block)
+        self.assertNotIn("onResize", block)
+        self.assertNotIn("onResize", Path(
+            PROJECT_ROOT / "app/src/main/java/com/termux/terminal"
+            / "ZmuxTerminalSession.kt"
+        ).read_text(encoding="utf-8"))
+
+    def test_theme_is_applied_immediately_on_attach(self) -> None:
+        # The palette must be applied right after attachSession and MUST
+        # notify the session via onColorsChanged() + invalidate(), otherwise
+        # the renderer keeps Termux's default palette until the next output
+        # (the "I changed colours but nothing happened" bug).
+        self.assertIn("private fun applyThemeToView(", self.activity_src)
+        self.assertIn("ZmuxTheme.applyToView(", self.activity_src)
+        self.assertIn("applyThemeToView(s.session)", self.activity_src)
+        self.assertIn("onColorsChanged", (
+            PROJECT_ROOT / "app/src/main/java/com/zmux/terminal/ZmuxTheme.kt"
+        ).read_text(encoding="utf-8"))
+        self.assertIn("Typeface.MONOSPACE", (
+            PROJECT_ROOT / "app/src/main/java/com/zmux/terminal/ZmuxTheme.kt"
+        ).read_text(encoding="utf-8"))
+        self.assertIn("monospace", (
+            PROJECT_ROOT / "app/src/main/res/layout/activity_terminal.xml"
+        ).read_text(encoding="utf-8"))
 
     def test_installed_rootfs_auto_reopened_on_activity_recreate(self) -> None:
         self.assertIn("detectInstalledLinux()", self.activity_src)

@@ -40,8 +40,6 @@ class ZmuxTerminalSession(
         }
     }
 
-    var onResize: ((Int, Int) -> Unit)? = null
-
     fun feed(bytes: ByteArray) {
         val emulator = TerminalSessionHelper.getEmulator(session) ?: return
         emulator.append(bytes, bytes.size)
@@ -54,9 +52,6 @@ class ZmuxTerminalSession(
         emulator.append(bytes, bytes.size)
         client.onTextChanged(session)
     }
-
-    val columns: Int get() = TerminalSessionHelper.getColumns(TerminalSessionHelper.getEmulator(session))
-    val rows: Int get() = TerminalSessionHelper.getRows(TerminalSessionHelper.getEmulator(session))
 
     fun finishIfRunning() {
         session.finishIfRunning()

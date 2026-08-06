@@ -1,7 +1,9 @@
 package com.zmux.terminal
 
 import android.graphics.Color
+import android.graphics.Typeface
 import com.termux.terminal.TerminalEmulator
+import com.termux.terminal.TerminalSession
 
 /**
  * **ZMUX Ember** — the native UI's own visual identity.
@@ -88,18 +90,28 @@ object ZmuxTheme {
     private const val IDX_CURSOR = 258
 
     /**
-     * Paint the palette onto a live emulator.
+     * Paint the palette onto a live emulator and force the view to redraw.
      *
-     * Termux exposes `TerminalEmulator.mColors.mCurrentColors` as a plain `int[]` of ARGB
-     * values (indices 0-255 = the colour cube, then fg/bg/cursor). Writing into it is how
-     * Termux itself applies `colors.properties`, so this uses the library the intended way
-     * rather than reaching around it.
+     * Termux exposes `TerminalEmulator.mColors.mCurrentColors` as a plain
+     * `int[]` of ARGB values (indices 0-255 = the colour cube, then
+     * fg/bg/cursor). Writing into it is how Termux itself applies
+     * `colors.properties`, so this uses the library the intended way rather
+     * than reaching around it.
      *
-     * Guarded because the field has moved between Termux releases and this PoC has not been
-     * compiled against a resolved artifact yet — a theme failure must never take the terminal
-     * down with it.
+     * The previous version only wrote the array and returned — it never
+     * told the session its colours had changed, so the renderer kept using
+     * the default palette until an unrelated redraw happened (the same
+     * "I changed colours but nothing happened" behaviour people see in
+     * Termux). We now also call [TerminalSession.onColorsChanged] which is
+     * what Termux's own OSC 4/10/11 handler calls after writing a colour,
+     * and invalidate the attached view so the first frame after
+     * `attachSession` already uses the ZMUX palette.
+     *
+     * Guarded because the field names have been stable across Termux
+     * releases but are not part of the public API; a theme failure must
+     * never take the terminal down with it.
      */
-    fun applyTo(emulator: TerminalEmulator?): Boolean {
+    fun applyTo(emulator: TerminalEmulator?, session: TerminalSession? = null): Boolean {
         if (emulator == null) return false
         return runCatching {
             val mColorsField = emulator.javaClass.getDeclaredField("mColors").apply { isAccessible = true }
@@ -114,8 +126,29 @@ object ZmuxTheme {
                 slots[IDX_BACKGROUND] = BG
                 slots[IDX_CURSOR] = EMBER
             }
+            // Tell the renderer the palette changed — this is the missing
+            // call that made earlier attempts look like they did nothing.
+            session?.onColorsChanged()
             true
         }.getOrDefault(false)
+    }
+
+    /** Apply the ZMUX palette and monospace typeface to a [TerminalView]. */
+    fun applyToView(
+        view: com.termux.view.TerminalView,
+        emulator: TerminalEmulator?,
+        session: TerminalSession?,
+    ) {
+        runCatching {
+            // Pin a real monospace typeface. The default Typeface.MONOSPACE
+            // is consistent across ROMs and is what Termux itself falls back
+            // to when no font.ttf is configured. Without this call the
+            // renderer uses whatever the view's XML style resolved to.
+            view.typeface = Typeface.MONOSPACE
+        }
+        if (applyTo(emulator, session)) {
+            view.invalidate()
+        }
     }
 
     /** Blend [color] toward transparent — used for pressed/disabled chrome. */

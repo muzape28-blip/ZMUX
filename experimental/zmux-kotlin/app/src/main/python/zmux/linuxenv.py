@@ -74,23 +74,11 @@ ALPINE_SHA512 = {
               "b437bcf60be2ee7ced261870a736e4831bc55924f73b23756283ecfb29b",
 }
 
-# Debian is intentionally pinned rather than fetched from a moving "latest"
-# endpoint. These files and SHA-256 values come from Termux proot-distro's
-# own Debian plug-in at tag v4.7.0. The earlier implementation pointed at a
-# nonexistent v4.0.0 asset, skipped checksum verification, and selected an
-# AArch64 archive on x86_64 hosts. That made the Debian choice fail even after
-# the Chaquopy callback issue was fixed.
-DEBIAN_RELEASE = "bookworm"
-DEBIAN_PROOT_DISTRO_RELEASE = "v4.7.0"
-DEBIAN_SHA256 = {
-    "aarch64": "4baa32280cc70b67e2c650777c1d974349f0cdf23afaabc305ad3bc6182b8df8",
-    "arm": "0eba2cb93261d6e73c2f3c32ed7ebe9de408ceef584c5e0c0b7e237d294f7a8d",
-    "i686": "7425f5fe7f34c718428f235b9155adb782c29ce6347f704f4a93a9da195b9aa3",
-    "x86_64": "164932ab77a0b94a8e355c9b68158a5b76d5abef89ada509488c44ff54655d61",
-}
-
 ROOTFS_OS_MARKER = ".zmux-rootfs"
-SUPPORTED_ROOTFS = frozenset(("alpine", "debian"))
+# ZMUX ships one supported guest: Alpine Linux. Rootfs detection requires
+# the marker below to say "alpine"; unsupported/unrecognized rootfses are
+# ignored and never reopened.
+SUPPORTED_ROOTFS = frozenset(("alpine",))
 
 #: Guest PATH handed to processes inside the sandbox. The child env is built
 #: by zmux.env for Android binaries; inside proot it must be Alpine's PATH or
@@ -202,10 +190,12 @@ def home_dir() -> Path:
 
 
 def _normalise_os_name(os_name: str) -> str:
+    """Validate the guest name. Alpine is the only supported guest."""
     value = str(os_name or "").strip().lower()
     if value not in SUPPORTED_ROOTFS:
-        choices = ", ".join(sorted(SUPPORTED_ROOTFS))
-        raise ValueError(f"unsupported Linux environment {os_name!r}; choose one of: {choices}")
+        raise ValueError(
+            f"unsupported Linux environment {os_name!r}; only 'alpine' is supported"
+        )
     return value
 
 
@@ -247,12 +237,11 @@ def _guest_regular_file(root: Path, guest_path: str) -> bool:
 
 
 def installed_os() -> str:
-    """Return the installed guest name, or ``""`` when no complete rootfs exists.
+    """Return ``"alpine"`` when a complete Alpine rootfs exists, else ``""``.
 
-    Debian minbase does not ship ``/bin/busybox``. Checking for that Alpine-only
-    file meant a successfully extracted Debian filesystem was always reported
-    as not installed. New installs receive an explicit marker; the two release
-    files retain compatibility with rootfs directories made by older builds.
+    The check is strict: ``/bin/sh`` must be a regular guest file (resolving
+    Alpine's absolute busybox symlinks inside the rootfs, not against the
+    Android host) and the rootfs marker must name the supported OS.
     """
     root = rootfs_dir()
     if not _guest_regular_file(root, "/bin/sh"):
@@ -263,10 +252,9 @@ def installed_os() -> str:
             return marker
     except OSError:
         pass
+    # Compatibility with Alpine installs made before the marker existed.
     if (root / "etc" / "alpine-release").is_file():
         return "alpine"
-    if (root / "etc" / "debian_version").is_file():
-        return "debian"
     return ""
 
 
@@ -275,16 +263,10 @@ def is_installed() -> bool:
 
 
 def installed_version() -> str:
-    root = rootfs_dir()
-    os_name = installed_os()
-    version_file = {
-        "alpine": root / "etc" / "alpine-release",
-        "debian": root / "etc" / "debian_version",
-    }.get(os_name)
-    if version_file is None:
+    if installed_os() != "alpine":
         return ""
     try:
-        return version_file.read_text("utf-8").strip()
+        return (rootfs_dir() / "etc" / "alpine-release").read_text("utf-8").strip()
     except OSError:
         return ""
 
@@ -528,9 +510,9 @@ def proot_env() -> dict:
         "PATH": GUEST_PATH,
         "HOME": GUEST_HOME,
         # Some Android kernels (esp. Android 14/15) deliver a fatal SIGSYS
-        # ("Bad system call") to proot's tracees — most visibly `apt update`
-        # on Debian — when proot uses its seccomp accelerator. Disabling it
-        # keeps glibc guests working; proot falls back to pure ptrace.
+        # ("Bad system call") to proot's tracees when proot uses its seccomp
+        # accelerator. Disabling it keeps guests working; proot falls back to
+        # pure ptrace.
         "PROOT_NO_SECCOMP": "1",
     }
     if _is_android():
@@ -623,7 +605,9 @@ def _nameserver_ips(path: Path = Path("/etc/resolv.conf")) -> list[str]:
             if len(parts) >= 2 and parts[0].lower() == "nameserver":
                 ip = parts[1].strip("%").split("%", 1)[0]
                 low = ip.lower()
-                if low in ("localhost", "::1") or low.startswith("127."):
+                # IPv4 only. Some mobile carriers hand out IPv6 DNS with no
+                # working route, which made apk hang on DNS.
+                if low in ("localhost", "::1") or low.startswith("127.") or ":" in low:
                     continue
                 servers.append(ip)
     except OSError:
@@ -636,17 +620,16 @@ def _ensure_guest_resolv_conf(root: Path | None = None) -> None:
 
     We deliberately do NOT bind-mount the host /etc/resolv.conf anymore: on
     Android it is often a loopback stub the guest cannot use, which produced
-    "Temporary failure resolving 'deb.debian.org'". Instead combine any
-    reachable host nameservers with public DNS fallbacks and write them into
-    the (writable, app-private) rootfs. Repairing on every launch also heals
-    rootfses installed before this fix.
+    "Temporary failure resolving". Use public IPv4 DNS so the Alpine guest
+    does not hang on a dead IPv6 resolver (some Indonesian carriers hand out
+    IPv6 addresses with no working route). Repairing on every launch also
+    heals rootfses installed before this fix.
     """
     root = root or rootfs_dir()
     etc = root / "etc"
     etc.mkdir(parents=True, exist_ok=True)
     servers: list[str] = []
-    for candidate in _nameserver_ips() + ["8.8.8.8", "1.1.1.1",
-                                           "2001:4860:4860::8888"]:
+    for candidate in _nameserver_ips() + ["8.8.8.8", "1.1.1.1"]:
         if candidate not in servers:
             servers.append(candidate)
     content = (
@@ -660,21 +643,22 @@ def _ensure_guest_resolv_conf(root: Path | None = None) -> None:
         pass
 
 
-def _write_guest_prompt(os_name: str, root: Path | None = None) -> None:
-    """Install a branded PS1 that wins over distro defaults.
+def _write_guest_prompt(root: Path | None = None) -> None:
+    """Install the branded PS1 that wins over Alpine's /etc/profile default.
 
-    Both Alpine (ash) and Debian (dash) source /etc/profile, which sets a
-    hostname-based prompt (``localhost:~#``) and then sources every
-    /etc/profile.d/*.sh. Dropping our own script there overrides that prompt
-    reliably regardless of shell or HOME. Raw ANSI escapes are used (no
-    bash-only ``\\[ \\]``) so they work under both dash and busybox ash.
+    Alpine's busybox ash sources /etc/profile, which sets a hostname-based
+    prompt (``localhost:~#``) and then sources every /etc/profile.d/*.sh.
+    Dropping our own script there overrides it reliably regardless of HOME.
+    Raw ANSI escapes are used (no bash-only ``\\[ \\]``) so they work under
+    busybox ash. The prompt is ``ZMUX:<path>$`` with the brand in ember and
+    the path in teal.
     """
     root = root or rootfs_dir()
     profile_d = root / "etc" / "profile.d"
     profile_d.mkdir(parents=True, exist_ok=True)
     esc = "\033"
     ps1 = (
-        f"{esc}[1;38;5;202mZMUX@{os_name}{esc}[0m:"
+        f"{esc}[1;38;5;202mZMUX{esc}[0m:"
         f"{esc}[38;5;80m\\w{esc}[0m\\$ "
     )
     try:
@@ -682,6 +666,36 @@ def _write_guest_prompt(os_name: str, root: Path | None = None) -> None:
             "# Managed by ZMUX — branded prompt.\n"
             f"PS1='{ps1}'\n"
             "export PS1\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+def _write_guest_motd(root: Path | None = None) -> None:
+    """Write a small, static welcome banner shown by Alpine's /etc/profile.
+
+    Pure ASCII/ANSI, no external commands — safe on low-end devices and in
+    CI. It is idempotent: re-running overwrites the same file.
+    """
+    root = root or rootfs_dir()
+    profile_d = root / "etc" / "profile.d"
+    profile_d.mkdir(parents=True, exist_ok=True)
+    try:
+        (profile_d / "zmux-motd.sh").write_text(
+            "# Managed by ZMUX — first-interactive-shell banner.\n"
+            "if [ \"$SHLVL\" = \"1\" ]; then\n"
+            "  printf '\\033[1;38;5;202m'\n"
+            "  cat <<'BANNER'\n"
+            "  ____  __  __ _   _ __  __\n"
+            " |_  / |  \\/  | | | |\\ \\/ /\n"
+            "  / /  | |\\/| | |_| | >  < \n"
+            " /___| |_|  |_|\\___/ /_/\\_\\\n"
+            "BANNER\n"
+            "  printf '\\033[0m\\033[38;5;80m  Alpine %s\\033[0m\\n' \"$(cat /etc/alpine-release 2>/dev/null)\"\n"
+            "  printf '\\033[90m  type \\033[36mapk add <pkg>\\033[90m to install packages\\033[0m\\n'\n"
+            "  printf '\\n'\n"
+            "fi\n",
             encoding="utf-8",
         )
     except OSError:
@@ -717,7 +731,8 @@ def build_proot_argv(guest_argv: list, host_cwd: Path,
         )
     argv = [proot, "-0", "-r", str(rootfs_dir()), *_bind_flags()]
     if is_installed():
-        _write_guest_prompt(installed_os())
+        _write_guest_prompt()
+        _write_guest_motd()
     for bind in extra_binds or ():
         argv += ["-b", bind]
     argv += ["-w", guest_cwd(host_cwd), *guest_argv]
@@ -754,11 +769,10 @@ def build_interactive_argv(host_cwd: Path) -> list:
 def ensure_user_home_layout() -> None:
     """Create the persistent guest-facing workspace.
 
-    ``HOME_DIR`` is bind-mounted as /root for both Alpine and Debian, so this
-    directory survives rootfs repair/reinstall and APK upgrades. The branded
-    prompt itself lives in /etc/profile.d (see _write_guest_prompt) so it wins
-    over each distro's default PS1 and does not require touching the user's
-    own ~/.profile.
+    ``HOME_DIR`` is bind-mounted as /root, so this directory survives rootfs
+    repair/reinstall and APK upgrades. The branded prompt itself lives in
+    /etc/profile.d (see _write_guest_prompt) so it wins over Alpine's default
+    PS1 and does not require touching the user's own ~/.profile.
     """
     HOME_DIR.mkdir(parents=True, exist_ok=True)
     (HOME_DIR / "projects").mkdir(parents=True, exist_ok=True)
@@ -774,17 +788,17 @@ def interactive_env() -> dict:
     """
     ensure_user_home_layout()
     if is_installed():
-        _write_guest_prompt(installed_os())
+        _write_guest_prompt()
+        _write_guest_motd()
     env = proot_env()
     env["TERM"] = "xterm-256color"
     env["LANG"] = "C.UTF-8"
     env["SHELL"] = "/bin/sh"
     env["USER"] = "zmux"
     env["LOGNAME"] = "zmux"
-    os_name = installed_os() or "linux"
     esc = "\033"
     env["PS1"] = (
-        f"{esc}[1;38;5;202mZMUX@{os_name}{esc}[0m:"
+        f"{esc}[1;38;5;202mZMUX{esc}[0m:"
         f"{esc}[38;5;80m\\w{esc}[0m\\$ "
     )
     return env
@@ -851,45 +865,21 @@ def install_guest_wrappers() -> int:
 # ---------------------------------------------------------------------------
 # Installation (download -> verified digest -> safe extract -> bootstrap)
 # ---------------------------------------------------------------------------
-def _rootfs_spec(os_name: str) -> dict[str, object]:
-    """Return the immutable, verified source description for one guest OS."""
-    os_name = _normalise_os_name(os_name)
+def _rootfs_spec(os_name: str = "alpine") -> dict[str, object]:
+    """Return the immutable, verified source description for Alpine."""
+    _normalise_os_name(os_name)
     arch = alpine_arch()
-    if os_name == "alpine":
-        expected = ALPINE_SHA512.get(arch)
-        if not expected:
-            raise RuntimeError(f"No pinned Alpine rootfs for architecture {arch!r}")
-        return {
-            "os_name": os_name,
-            "label": f"Alpine {ALPINE_VERSION}",
-            "url": (f"{ALPINE_MIRROR}/{ALPINE_BRANCH}/releases/{arch}/"
-                    f"alpine-minirootfs-{ALPINE_VERSION}-{arch}.tar.gz"),
-            "checksum_name": "sha512",
-            "checksum": expected,
-            "extension": "tar.gz",
-            "strip_components": 0,
-        }
-
-    # The proot-distro archive deliberately contains a single top-level
-    # directory (e.g. debian-bookworm-aarch64). It is stripped after the safe
-    # extraction below, so /bin/sh ends up directly in our rootfs directory.
-    debian_arch = {"aarch64": "aarch64", "armv7": "arm", "x86_64": "x86_64"}.get(arch)
-    expected = DEBIAN_SHA256.get(debian_arch or "")
-    if not debian_arch or not expected:
-        raise RuntimeError(f"No pinned Debian rootfs for architecture {arch!r}")
-    filename = (
-        f"debian-{DEBIAN_RELEASE}-{debian_arch}-pd-"
-        f"{DEBIAN_PROOT_DISTRO_RELEASE}.tar.xz"
-    )
+    expected = ALPINE_SHA512.get(arch)
+    if not expected:
+        raise RuntimeError(f"No pinned Alpine rootfs for architecture {arch!r}")
     return {
-        "os_name": os_name,
-        "label": f"Debian {DEBIAN_RELEASE}",
-        "url": ("https://github.com/termux/proot-distro/releases/download/"
-                f"{DEBIAN_PROOT_DISTRO_RELEASE}/{filename}"),
-        "checksum_name": "sha256",
+        "os_name": "alpine",
+        "label": f"Alpine {ALPINE_VERSION}",
+        "url": (f"{ALPINE_MIRROR}/{ALPINE_BRANCH}/releases/{arch}/"
+                f"alpine-minirootfs-{ALPINE_VERSION}-{arch}.tar.gz"),
+        "checksum_name": "sha512",
         "checksum": expected,
-        "extension": "tar.xz",
-        "strip_components": 1,
+        "extension": "tar.gz",
     }
 
 
@@ -1018,7 +1008,7 @@ def install(progress=None, os_name="alpine") -> dict:
     staging.mkdir(parents=True)
     try:
         report("Extracting rootfs into app-private storage…\n")
-        _safe_extract(tarball, staging, int(spec["strip_components"]))
+        _safe_extract(tarball, staging)
         report("Configuring Linux filesystem…\n")
         _bootstrap(staging, selected)
         # Atomic swap: never leave a half-installed rootfs at the live path.
@@ -1041,23 +1031,17 @@ def install(progress=None, os_name="alpine") -> dict:
     }
 
 
-def _safe_extract(tarball: Path, target: Path, strip_components: int = 0) -> None:
-    """Extract a verified rootfs with traversal checks and optional top-dir strip."""
-    mode = "r:xz" if tarball.name.endswith(".xz") else "r:gz"
-    if mode == "r:xz":
-        try:
-            import lzma  # noqa: F401 - force a clear diagnostic before opening.
-        except ImportError as error:
-            raise RuntimeError(
-                "Debian installation requires Python's lzma module, which is missing "
-                "from this APK build. Reinstall an APK built with Chaquopy lzma support."
-            ) from error
+def _safe_extract(tarball: Path, target: Path) -> None:
+    """Extract the verified Alpine gzip tarball with traversal checks.
 
-    with tarfile.open(tarball, mode) as archive:
+    Alpine minirootfs uses ``.tar.gz`` and no top-level directory stripping.
+    The signature intentionally takes no ``strip_components`` argument because
+    Alpine minirootfs extracts directly into the rootfs and a second archive
+    shape is not supported.
+    """
+    with tarfile.open(tarball, "r:gz") as archive:
         members = []
-        roots: set[str] = set()
         total = 0
-        skipped_privileged = 0
         for member in archive.getmembers():
             name = member.name
             parts = tuple(part for part in Path(name).parts if part not in ("", "."))
@@ -1071,28 +1055,13 @@ def _safe_extract(tarball: Path, target: Path, strip_components: int = 0) -> Non
             if name.startswith("/") or not parts or ".." in parts:
                 raise RuntimeError(f"unsafe archive member: {name!r}")
 
-            guest_parts = parts[strip_components:]
-            if strip_components:
-                if len(parts) <= strip_components:
-                    # The top-level directory entry itself is expected; all
-                    # useful members must have at least one remaining segment.
-                    if member.isdir() and len(parts) == strip_components:
-                        roots.add(parts[0])
-                        members.append(member)
-                        continue
-                    raise RuntimeError(f"rootfs member has no path after strip: {name!r}")
-                roots.add(parts[0])
-
             # Rootfs archives contain /dev nodes (null, zero, tty, ...). An
-            # Android app UID must never call mknod(), which is exactly the
-            # source of ``PermissionError: [Errno 1] Operation not permitted``
-            # during Debian setup. PRoot binds the real host /dev for every
-            # guest invocation, so device entries are not only uncreatable but
-            # unnecessary. This follows Termux proot-distro's --exclude=dev
-            # installation rule. Keep the empty /dev directory as a mountpoint.
-            is_dev_payload = bool(guest_parts and guest_parts[0] == "dev" and len(guest_parts) > 1)
-            if is_dev_payload or member.ischr() or member.isblk() or member.isfifo():
-                skipped_privileged += 1
+            # Android app UID must never call mknod(), which would raise
+            # ``PermissionError: [Errno 1] Operation not permitted`` during
+            # extraction. PRoot binds the real host /dev for every guest
+            # invocation, so device entries are not only uncreatable but
+            # unnecessary. Keep the empty /dev directory as a mountpoint.
+            if (len(parts) > 1 and parts[0] == "dev") or member.ischr() or member.isblk() or member.isfifo():
                 continue
 
             if member.isfile():
@@ -1100,10 +1069,6 @@ def _safe_extract(tarball: Path, target: Path, strip_components: int = 0) -> Non
                 if total > MAX_ROOTFS_BYTES:
                     raise RuntimeError("uncompressed rootfs exceeds safety limit")
             members.append(member)
-
-        if strip_components and len(roots) != 1:
-            raise RuntimeError("rootfs archive must contain exactly one top-level directory")
-        root_prefix = next(iter(roots), "")
 
         # Python 3.14 changed extractall's default filter to "data", which
         # rejects the absolute symlink targets used by normal Linux rootfses.
@@ -1114,21 +1079,10 @@ def _safe_extract(tarball: Path, target: Path, strip_components: int = 0) -> Non
         except TypeError:
             archive.extractall(target, members=members)
 
-    if strip_components:
-        payload = target / root_prefix
-        if not payload.is_dir():
-            raise RuntimeError(f"rootfs top-level directory missing after extraction: {root_prefix!r}")
-        for child in payload.iterdir():
-            destination = target / child.name
-            if destination.exists():
-                raise RuntimeError(f"rootfs archive conflicts with extraction target: {child.name!r}")
-            os.replace(child, destination)
-        payload.rmdir()
 
-
-def _bootstrap(root: Path, os_name: str) -> None:
-    """Write OS-specific first-run configuration and a durable OS marker."""
-    os_name = _normalise_os_name(os_name)
+def _bootstrap(root: Path, os_name: str = "alpine") -> None:
+    """Write first-run Alpine configuration and a durable OS marker."""
+    _normalise_os_name(os_name)
     if not _guest_regular_file(root, "/bin/sh"):
         raise RuntimeError("rootfs is missing a usable guest /bin/sh after extraction")
 
@@ -1136,65 +1090,29 @@ def _bootstrap(root: Path, os_name: str) -> None:
     etc.mkdir(parents=True, exist_ok=True)
     # /dev payload entries are intentionally omitted: creating device nodes is
     # forbidden to an Android app UID, and PRoot overlays the host /dev. Keep
-    # the mountpoint itself explicit for PRoot implementations which require it.
+    # the mountpoints themselves explicit.
     for mountpoint in ("dev", "proc", "sys"):
         (root / mountpoint).mkdir(parents=True, exist_ok=True)
-    if os_name == "alpine":
-        apk = etc / "apk"
-        apk.mkdir(parents=True, exist_ok=True)
-        (apk / "repositories").write_text(
-            f"{ALPINE_MIRROR}/{ALPINE_BRANCH}/main\n"
-            f"{ALPINE_MIRROR}/{ALPINE_BRANCH}/community\n",
-            encoding="utf-8",
-        )
-        # The official minirootfs normally contains this marker, but retain a
-        # fallback for interrupted/cross-version upgrades.
-        release = etc / "alpine-release"
-        if not release.is_file():
-            release.write_text(f"{ALPINE_VERSION}\n", encoding="utf-8")
-    elif not (etc / "debian_version").is_file():
-        raise RuntimeError("Debian rootfs is missing /etc/debian_version after extraction")
 
-    if os_name == "debian":
-        # proot-distro's Debian minbase intentionally ships without
-        # /etc/apt/sources.list, so a bare `apt update` has no repos to
-        # fetch and fails. Provide the standard Bookworm deb.debian.org
-        # suite (main + updates + security) over HTTPS. apt verifies Release
-        # files against the keyring bundled in the rootfs; no
-        # --allow-unauthenticated is used.
-        apt_dir = etc / "apt"
-        sources_dir = apt_dir / "sources.list.d"
-        sources_dir.mkdir(parents=True, exist_ok=True)
-        (apt_dir / "sources.list").write_text(
-            f"deb https://deb.debian.org/debian {DEBIAN_RELEASE} main\n"
-            f"deb https://deb.debian.org/debian {DEBIAN_RELEASE}-updates main\n"
-            f"deb https://security.debian.org/debian-security "
-            f"{DEBIAN_RELEASE}-security main\n",
-            encoding="utf-8",
-        )
-        # apt inside proot needs a few writable state/cache dirs that a
-        # stripped minbase may not include.
-        for sub in ("apt/apt.conf.d", "apt/preferences.d",
-                    "apt/trusted.gpg.d", "apt/sources.list.d"):
-            (etc / sub).mkdir(parents=True, exist_ok=True)
-        for sub in ("var/lib/dpkg", "var/lib/apt/lists/partial",
-                    "var/cache/apt/archives/partial", "var/log/apt"):
-            (root / sub).mkdir(parents=True, exist_ok=True)
-        # apt drops privileges to the _apt user when fetching; that uid does
-        # not exist inside a stripped minbase, which makes downloads fail
-        # with "Could not open lock file / permission denied". Stay as root.
-        apt_conf = etc / "apt/apt.conf.d/99zmux"
-        apt_conf.write_text(
-            'APT::Sandbox::User "root";\n'
-            'Acquire::Languages "none";\n',
-            encoding="utf-8",
-        )
+    apk = etc / "apk"
+    apk.mkdir(parents=True, exist_ok=True)
+    (apk / "repositories").write_text(
+        f"{ALPINE_MIRROR}/{ALPINE_BRANCH}/main\n"
+        f"{ALPINE_MIRROR}/{ALPINE_BRANCH}/community\n",
+        encoding="utf-8",
+    )
+    # The official minirootfs normally contains this marker, but retain a
+    # fallback for interrupted/cross-version upgrades.
+    release = etc / "alpine-release"
+    if not release.is_file():
+        release.write_text(f"{ALPINE_VERSION}\n", encoding="utf-8")
 
     # DNS: never copy the Android host resolv.conf (it is often a loopback
     # stub the guest can't reach). Build a clean one with public resolvers.
     _ensure_guest_resolv_conf(root)
-    _write_guest_prompt(os_name, root)
-    (etc / ROOTFS_OS_MARKER).write_text(f"{os_name}\n", encoding="utf-8")
+    _write_guest_prompt(root)
+    _write_guest_motd(root)
+    (etc / ROOTFS_OS_MARKER).write_text("alpine\n", encoding="utf-8")
 
 
 def uninstall() -> dict:
@@ -1295,16 +1213,15 @@ def run_gates(report=None) -> dict:
     guest_name = installed_os()
     if proot and guest_name:
         try:
-            version_path = "/etc/alpine-release" if guest_name == "alpine" else "/etc/debian_version"
             line = build_command_line(["/bin/sh", "-c",
-                                       f"echo zmux-linux-ok; cat {version_path}"], HOME_DIR)
+                                       "echo zmux-linux-ok; cat /etc/alpine-release"], HOME_DIR)
             env = dict(os.environ)
             env.update(proot_env())
             result = subprocess.run(line, shell=True, capture_output=True,
                                     text=True, timeout=60, env=env)
             ok = result.returncode == 0 and "zmux-linux-ok" in (result.stdout or "")
             gate("linux-boot", ok,
-                 f"{guest_name.capitalize()} {installed_version()} boots in proot "
+                 f"Alpine {installed_version()} boots in proot "
                  f"(exit={result.returncode}, out={result.stdout.strip()!r})")
         except Exception as error:
             gate("linux-boot", False, f"boot failed: {error}")
@@ -1340,11 +1257,11 @@ def run_gates(report=None) -> dict:
     else:
         gate("git-clone", False, "skipped: proot/rootfs unavailable")
 
-    # G5 — the selected guest's package manager is present. Network update is
+    # G5 — Alpine's package manager is present. Network update is
     # environment-dependent and intentionally not part of this binary-level gate.
     if proot and guest_name:
-        package_tool = ["/sbin/apk", "--version"] if guest_name == "alpine" else ["/usr/bin/apt-get", "--version"]
-        gate_name = "apk" if guest_name == "alpine" else "apt"
+        package_tool = ["/sbin/apk", "--version"]
+        gate_name = "apk"
         try:
             line = build_command_line(package_tool, HOME_DIR)
             env = dict(os.environ)

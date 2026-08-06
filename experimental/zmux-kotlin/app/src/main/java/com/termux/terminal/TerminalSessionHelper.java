@@ -46,9 +46,9 @@ public class TerminalSessionHelper {
             fw.write("echo '" + esc + "[33m=================================================" + esc + "[0m'\n");
             fw.write("echo '" + esc + "[32mWELCOME TO ZMUX, FEEL FREE TO EXEC COMMAND..." + esc + "[0m'\n");
             fw.write("echo ''\n");
-            fw.write("echo '(Type " + esc + "[34mlinux-setup" + esc + "[0m to install Alpine or Debian)'\n");
+            fw.write("echo '(Type " + esc + "[34mlinux-setup" + esc + "[0m to install Alpine Linux)'\n");
             fw.write("echo '" + esc + "[33m=================================================" + esc + "[0m'\n");
-            fw.write("export PS1='" + esc + "[1;38;5;202mZMUX@local" + esc + "[0m:" + esc + "[38;5;80m\\w" + esc + "[0m$ '\n");
+            fw.write("export PS1='" + esc + "[1;38;5;202mZMUX" + esc + "[0m:" + esc + "[38;5;80m\\w" + esc + "[0m$ '\n");
             fw.write("alias ls='ls --color=auto'\n");
             fw.write("alias clear='clear; printf \"\\033[3J\"'\n");
             // Android 10+ W^X: files/bin/* can never be execve()'d directly, so
@@ -73,31 +73,24 @@ public class TerminalSessionHelper {
             fws.write("echo '" + esc + "[33m=================================================" + esc + "[0m'\n");
             fws.write("echo '" + esc + "[32m ZMUX Linux Setup" + esc + "[0m'\n");
             fws.write("echo '" + esc + "[33m=================================================" + esc + "[0m'\n");
-            fws.write("echo '1) Alpine Linux (Lightweight, APK)'\n");
-            fws.write("echo '2) Debian (Robust, APT)'\n");
-            fws.write("echo '3) Cancel'\n");
+            fws.write("echo 'This will download and install Alpine Linux 3.22 (~3 MiB).'\n");
             fws.write("echo ''\n");
-            fws.write("printf 'Choose [1/2/3]: '\n");
-            fws.write("read choice\n");
-            fws.write("if [ \"$choice\" = \"1\" ]; then\n");
-            fws.write("    echo ''\n");
-            fws.write("    echo '" + esc + "[32m[*]" + esc + "[0m Triggering Alpine Linux installation...'\n");
-            fws.write("    rm -f \"$HOME/.setup_done\"\n");
-            fws.write("    printf \"\\033]0;INSTALL_ALPINE\\007\"\n");
-            fws.write("    while [ ! -f \"$HOME/.setup_done\" ]; do sleep 0.5; done\n");
-            fws.write("    rm -f \"$HOME/.setup_done\"\n");
-            fws.write("    printf \"\\033]0;ZMUX\\007\"\n");
-            fws.write("elif [ \"$choice\" = \"2\" ]; then\n");
-            fws.write("    echo ''\n");
-            fws.write("    echo '" + esc + "[32m[*]" + esc + "[0m Triggering Debian installation...'\n");
-            fws.write("    rm -f \"$HOME/.setup_done\"\n");
-            fws.write("    printf \"\\033]0;INSTALL_DEBIAN\\007\"\n");
-            fws.write("    while [ ! -f \"$HOME/.setup_done\" ]; do sleep 0.5; done\n");
-            fws.write("    rm -f \"$HOME/.setup_done\"\n");
-            fws.write("    printf \"\\033]0;ZMUX\\007\"\n");
-            fws.write("else\n");
-            fws.write("    echo 'Cancelled.'\n");
-            fws.write("fi\n");
+            fws.write("printf 'Install Alpine now? [y/N]: '\n");
+            fws.write("IFS= read -r choice\n");
+            fws.write("case \"$choice\" in\n");
+            fws.write("    y|Y)\n");
+            fws.write("        echo ''\n");
+            fws.write("        echo '" + esc + "[32m[*]" + esc + "[0m Triggering Alpine Linux installation...'\n");
+            fws.write("        rm -f \"$HOME/.setup_done\"\n");
+            fws.write("        printf \"\\033]0;INSTALL_ALPINE\\007\"\n");
+            fws.write("        while [ ! -f \"$HOME/.setup_done\" ]; do sleep 0.5; done\n");
+            fws.write("        rm -f \"$HOME/.setup_done\"\n");
+            fws.write("        printf \"\\033]0;ZMUX\\007\"\n");
+            fws.write("        ;;\n");
+            fws.write("    *)\n");
+            fws.write("        echo 'Cancelled.'\n");
+            fws.write("        ;;\n");
+            fws.write("esac\n");
             fws.close();
 
             // W^X-safe regardless: the alias above invokes this through `sh`,
@@ -118,7 +111,13 @@ public class TerminalSessionHelper {
             "PATH=/system/bin:/system/xbin:/vendor/bin",
             "ENV=" + filesDir + "/.zmuxrc"
         };
-        return new TerminalSession("/system/bin/sh", filesDir, new String[0], env, 2000, client);
+        // 80x24 is the conventional default PTY size. The TerminalView
+        // replaces this with the real cols/rows during its first layout via
+        // updateSize() -> session.updateSize() (TIOCSWINSZ). It MUST NOT be
+        // 2000: that wide initial geometry made line editing wrap wrong on
+        // phone-width screens before the first resize propagated (see the
+        // "apk add python3 wraps the 3" regression).
+        return new TerminalSession("/system/bin/sh", filesDir, new String[0], env, 80, client);
     }
 
     /** Quote a path for embedding inside a POSIX sh command line. */
@@ -215,11 +214,11 @@ public class TerminalSessionHelper {
      *
      * We used to bind-mount the Android host /etc/resolv.conf into the guest.
      * On many devices that file points at a loopback stub (127.0.0.1 / ::1)
-     * the PRoot guest cannot reach, so `apt update` failed with
-     * "Temporary failure resolving 'deb.debian.org'" and `apk add` hung on
-     * the first DNS lookup. Now the guest gets its own resolv.conf built from
-     * any reachable host nameserver plus public DNS fallbacks. This also
-     * repairs rootfses installed before the fix.
+     * the PRoot guest cannot reach, so `apk add` hung on the first DNS
+     * lookup. Now the guest gets its own resolv.conf built from any
+     * reachable host nameserver plus public IPv4 DNS fallbacks (IPv6 is
+     * intentionally omitted: some carriers hand out v6 with no route). This
+     * also repairs rootfses installed before the fix.
      */
     private static void ensureGuestResolvConf(java.io.File rootfs) {
         try {
@@ -236,17 +235,19 @@ public class TerminalSessionHelper {
                         int pct = ip.indexOf('%');
                         if (pct >= 0) ip = ip.substring(0, pct);
                         String low = ip.toLowerCase();
-                        boolean loopback = low.equals("::1") || low.equals("localhost")
-                                || low.startsWith("127.");
-                        if (!loopback) servers.add(ip);
+                        boolean unusable = low.equals("::1") || low.equals("localhost")
+                                || low.startsWith("127.") || low.contains(":");
+                        // IPv4 only: skip loopback and IPv6 addresses. Some
+                        // carriers hand out v6 DNS with no working route,
+                        // which made apk hang on name resolution.
+                        if (!unusable) servers.add(ip);
                     }
                 }
             }
-            // Public fallbacks — always present so a broken/absent host
+            // Public IPv4 fallbacks — always present so a broken/absent host
             // resolver never strands the guest.
             servers.add("8.8.8.8");
             servers.add("1.1.1.1");
-            servers.add("2001:4860:4860::8888");
 
             StringBuilder sb = new StringBuilder();
             sb.append("# Generated by ZMUX — do not rely on the Android host resolver.\n");
@@ -257,30 +258,58 @@ public class TerminalSessionHelper {
                     sb.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
         } catch (Exception ignored) {
             // A failed repair must never block launching the shell; DNS
-            // diagnostics from apt/apk remain the source of truth.
+            // diagnostics remain the source of truth.
         }
     }
 
     /**
-     * Drop a branded PS1 into /etc/profile.d so it wins over the distro
-     * default. Both Alpine (busybox ash) and Debian (dash) source
-     * /etc/profile on a login shell, which sets a hostname-based prompt
-     * ("localhost:~#") and then sources every /etc/profile.d/*.sh — so our
-     * file overrides it regardless of $HOME or which shell is in use.
+     * Drop the branded PS1 into /etc/profile.d so it wins over Alpine's
+     * default. Busybox ash sources /etc/profile on a login shell, which sets
+     * a hostname-based prompt ("localhost:~#") and then sources every
+     * /etc/profile.d/*.sh, so our file overrides it regardless of $HOME.
      */
-    private static void ensureGuestPrompt(java.io.File rootfs, String osName) {
+    private static void ensureGuestPrompt(java.io.File rootfs) {
         try {
             java.io.File profileD = new java.io.File(rootfs, "etc/profile.d");
             profileD.mkdirs();
             String esc = "\033";
-            String ps1 = esc + "[1;38;5;202mZMUX@" + osName + esc + "[0m:"
+            String ps1 = esc + "[1;38;5;202mZMUX" + esc + "[0m:"
                     + esc + "[38;5;80m\\w" + esc + "[0m\\$ ";
-            String content =
-                    "# Managed by ZMUX — branded prompt.\n"
-                    + "PS1='" + ps1 + "'\n"
-                    + "export PS1\n";
             java.nio.file.Files.write(
                     new java.io.File(profileD, "zmux-prompt.sh").toPath(),
+                    ("# Managed by ZMUX — branded prompt.\n"
+                            + "PS1='" + ps1 + "'\n"
+                            + "export PS1\n")
+                            .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        } catch (Exception ignored) {
+        }
+    }
+
+    /**
+     * Drop a small static MOTD into /etc/profile.d. Pure echo/cat, no extra
+     * processes or network calls. The guard on SHLVL keeps it off nested
+     * shells so it appears once per login.
+     */
+    private static void ensureGuestMotd(java.io.File rootfs) {
+        try {
+            java.io.File profileD = new java.io.File(rootfs, "etc/profile.d");
+            profileD.mkdirs();
+            String content =
+                    "# Managed by ZMUX — first-login banner.\n"
+                    + "if [ \"$SHLVL\" = \"1\" ]; then\n"
+                    + "  printf '\\033[1;38;5;202m'\n"
+                    + "  cat <<'BANNER'\n"
+                    + "  ____  __  __ _   _ __  __\n"
+                    + " |_  / |  \\/  | | | |\\ \\/ /\n"
+                    + "  / /  | |\\/| | |_| | >  < \n"
+                    + " /___| |_|  |_|\\___/ /_/\\_\\\n"
+                    + "BANNER\n"
+                    + "  printf '\\033[0m\\033[38;5;80m  Alpine %s\\033[0m\\n' \"$(cat /etc/alpine-release 2>/dev/null)\"\n"
+                    + "  printf '\\033[90m  type \\033[36mapk add <pkg>\\033[90m to install packages\\033[0m\\n'\n"
+                    + "  printf '\\n'\n"
+                    + "fi\n";
+            java.nio.file.Files.write(
+                    new java.io.File(profileD, "zmux-motd.sh").toPath(),
                     content.getBytes(java.nio.charset.StandardCharsets.UTF_8));
         } catch (Exception ignored) {
         }
@@ -300,22 +329,12 @@ public class TerminalSessionHelper {
         new java.io.File(home, "projects").mkdirs();
         cache.mkdirs();
 
-        String osLabel = "linux";
-        java.io.File marker = new java.io.File(rootfs, "etc/.zmux-rootfs");
-        try {
-            if (marker.isFile()) {
-                String value = new String(java.nio.file.Files.readAllBytes(marker.toPath()),
-                        java.nio.charset.StandardCharsets.UTF_8).trim().toLowerCase();
-                if (!value.isEmpty()) osLabel = value;
-            }
-        } catch (Exception ignored) {
-        }
-
-        // Heal DNS and prompt BEFORE building argv/proot. This is what fixes
-        // "Temporary failure resolving" in Debian and the apk hang in Alpine
-        // (both were the host resolv.conf loopback stub shadowing the guest).
+        // Heal DNS, prompt and motd BEFORE building argv/proot. This is what
+        // fixes the apk hang caused by the host resolv.conf loopback stub
+        // shadowing the guest.
         ensureGuestResolvConf(rootfs);
-        ensureGuestPrompt(rootfs, osLabel);
+        ensureGuestPrompt(rootfs);
+        ensureGuestMotd(rootfs);
 
         java.util.List<String> args = new java.util.ArrayList<>(java.util.Arrays.asList(
             "--kill-on-exit",
@@ -377,8 +396,8 @@ public class TerminalSessionHelper {
 
         // Fallback prompt only. The real prompt is installed at
         // /etc/profile.d/zmux-prompt.sh by ensureGuestPrompt so it wins over
-        // the distro default on both Alpine ash and Debian dash.
-        String ps1 = "\033[1;38;5;202mZMUX@" + osLabel + "\033[0m:\033[38;5;80m\\w\033[0m\\$ ";
+        // Alpine's /etc/profile default.
+        String ps1 = "\033[1;38;5;202mZMUX\033[0m:\033[38;5;80m\\w\033[0m\\$ ";
 
         String[] env = new String[] {
             "HOME=/root",
@@ -392,16 +411,19 @@ public class TerminalSessionHelper {
             "LD_LIBRARY_PATH=" + ldLibraryPath,
             "PROOT_LOADER=" + loader,
             "PROOT_TMP_DIR=" + cache.getAbsolutePath(),
-            // Avoid SIGSYS ("Bad system call") inside apt on kernels whose
-            // seccomp filter rejects proot's accelerator (Android 14/15).
+            // Avoid SIGSYS ("Bad system call") on kernels whose seccomp
+            // filter rejects proot's accelerator (Android 14/15).
             "PROOT_NO_SECCOMP=1",
         };
+        // 80x24 default; real cols/rows are propagated from TerminalView
+        // after layout via updateSize(). See createLocalSession() for why
+        // this must not be 2000.
         return new TerminalSession(
             prootPath,
             filesDir,
             args.toArray(new String[0]),
             env,
-            2000,
+            80,
             client
         );
     }
@@ -416,28 +438,7 @@ public class TerminalSessionHelper {
         }
     }
 
-    public static int getColumns(TerminalEmulator emulator) {
-        if (emulator == null) return 80;
-        try {
-            Field f = TerminalEmulator.class.getDeclaredField("mColumns");
-            f.setAccessible(true);
-            return f.getInt(emulator);
-        } catch (Exception e) {
-            return 80;
-        }
-    }
-
     public interface ProgressCallback {
         void invoke(String msg);
-    }
-    public static int getRows(TerminalEmulator emulator) {
-        if (emulator == null) return 24;
-        try {
-            Field f = TerminalEmulator.class.getDeclaredField("mRows");
-            f.setAccessible(true);
-            return f.getInt(emulator);
-        } catch (Exception e) {
-            return 24;
-        }
     }
 }
