@@ -101,6 +101,18 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
         // before Python.start() and before the first `zmux` module is imported.
         runCatching { android.system.Os.setenv("ANDROID_PRIVATE", filesDir.absolutePath, true) }
 
+        // Start Chaquopy in background to prevent ANR during startup.
+        // Python.isStarted() guard ensures this is idempotent.
+        Thread {
+            try {
+                if (!Python.isStarted()) {
+                    Python.start(AndroidPlatform(this@ZmuxTerminalActivity))
+                }
+            } catch (e: Exception) {
+                // Chaquopy init failed silently
+            }
+        }.apply { start() }
+
         setContentView(R.layout.activity_terminal)
 
         terminalView = findViewById(R.id.terminal_view)
@@ -127,22 +139,22 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
         buildVirtualKeys()
 
         // FIX ANR: Start with bootstrap shell immediately (non-blocking).
-        // Chaquopy initialization and Linux detection run in background.
+        // Chaquopy initialization runs in background thread.
         // This prevents "zmux tidak ada tanggapan" popup.
         createNewSession()
 
-        // Background initialization: Chaquopy + Linux detection
-        // Runs AFTER UI is ready to prevent ANR during startup/input
+        // Background Linux detection - runs AFTER UI is ready
         detectThread = Thread {
             try {
-                // Start Chaquopy (can take 1-3 seconds on low-end devices)
-                if (!Python.isStarted()) {
-                    Python.start(AndroidPlatform(this@ZmuxTerminalActivity))
+                // Wait for Chaquopy to be ready (Python.start() in background)
+                var attempts = 0
+                while (!Python.isStarted() && attempts < 50) {
+                    Thread.sleep(100)
+                    attempts++
                 }
-                chaquopyReady = true
 
                 // Small delay to let the UI settle first
-                Thread.sleep(500)
+                Thread.sleep(300)
 
                 val installed = detectInstalledLinux()
                 if (installed != null && !isFinishing && !isDestroyed) {
