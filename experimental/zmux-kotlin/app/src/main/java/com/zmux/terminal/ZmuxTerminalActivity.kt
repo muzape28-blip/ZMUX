@@ -364,6 +364,25 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
         val proot = java.io.File(applicationInfo.nativeLibraryDir, "libproot.so")
         if (!proot.isFile || !proot.canExecute()) return null
 
+        // Wrong-arch guard: an armv7 guest left by an older build under a
+        // 64-bit kernel makes dynamically linked binaries (apk, git…) hang
+        // on compat syscalls proot does not translate — the months-long
+        // "every command freezes silently, only ping works" bug. The
+        // install() flow already replaces such a guest, but auto-reopen
+        // must not bypass that guard by launching it straight away.
+        // Refuse to open it and tell the user to run linux-setup instead.
+        val wantArch = runCatching { linuxenv()?.callAttr("alpine_arch")?.toString() }.getOrNull()
+        val haveArch = runCatching {
+            java.io.File(rootfs, "etc/apk/arch").takeIf { it.isFile }?.readText()?.trim()
+        }.getOrNull()
+        if (!wantArch.isNullOrBlank() && wantArch != "None"
+            && !haveArch.isNullOrBlank() && wantArch != haveArch) {
+            legacyInstallNote = "Installed Linux is $haveArch but this device needs $wantArch. " +
+                "Run linux-setup once — it replaces the guest with the correct build " +
+                "(your home directory is preserved)."
+            return null
+        }
+
         return InstalledLinux(
             osName = osName,
             prootPath = proot.absolutePath,

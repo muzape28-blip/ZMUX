@@ -330,6 +330,19 @@ class KotlinShellContractTests(unittest.TestCase):
         self.assertIn(", 2000,", self.helper_src)
         self.assertNotIn(", 80,", self.helper_src)
 
+    def test_auto_reopen_refuses_wrong_arch_guest(self) -> None:
+        # Auto-reopen must not bypass linux-setup's arch guard: an armv7
+        # guest on an aarch64 device hangs every real binary (apk, git) on
+        # untranslated compat syscalls while busybox ping keeps working —
+        # the "two months of silent hangs" report. detectInstalledLinux()
+        # must compare /etc/apk/arch with linuxenv.alpine_arch() and refuse
+        # before launching PRoot.
+        detect_block = self._method_block(self.activity_src, "private fun detectInstalledLinux")
+        self.assertIn("etc/apk/arch", detect_block)
+        self.assertIn("alpine_arch", detect_block)
+        self.assertIn("legacyInstallNote", detect_block)
+        self.assertIn("Wrong-arch", detect_block)
+
     def test_virtual_key_does_not_fire_on_touch_down(self) -> None:
         # Regression: keys used to call onFire() in ACTION_DOWN, so a finger
         # starting a horizontal scroll on the key bar immediately sent an
