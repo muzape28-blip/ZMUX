@@ -1,137 +1,98 @@
 # ZMUX
 
-**ZMUX** adalah aplikasi terminal Android (*ZMUX Ember*) bernavigasi dan bergaya antarmuka asli (Native Kotlin UI) yang berjalan di atas engine PTY berbasis Python (`realpty.py` + PRoot/Alpine Linux).
+**ZMUX** (*ZMUX Ember*) is an Android terminal app with a native Kotlin UI that
+runs a **real Alpine Linux userland** on top of a Python-based PTY engine
+(`realpty.py` + PRoot/Alpine). No root required.
+
+It descends from the WebView terminal in [`ZABAWHEELS`](https://github.com/muzape28-blip/ZABAWHEELS):
+same PTY / proot / Alpine engine, but the UI is now native Kotlin using Termux's
+`terminal-view` + `terminal-emulator` (Apache-2.0) instead of a WebView.
+
+> **Honest status:** this is a working PoC of the native Kotlin UI. Unit tests
+> pass (see below), but it has **not** been validated as a release build on a
+> physical device yet — the seccomp/PTY behaviour and IME resize behaviour still
+> need on-device testing before a release.
 
 ---
 
-## 🚀 CI/CD & Aktivitas Build GitHub Actions
+## What it is now
 
-### Mengapa Tidak Ada Aktivitas Build Sebelumnya?
-1. Sebelumnya, repositori belum memiliki konfigurasi workflow di `.github/workflows/`.
-2. Saat mencoba menambahkan workflow CI secara otomatis dari bot ini, GitHub menolak dengan pesan error:
-   `refusing to allow a GitHub App to create or update workflow .github/workflows/ci.yml without workflows permission`
-   Hal ini karena koneksi GitHub App di Arena saat ini belum mengaktifkan izin **`workflows`**.
-
-### Bagaimana Repositori Ini Dioptimalkan ("Optimalkan Paksa")
-Untuk tetap mengoptimalkan repositori secara paksa dan menyediakan alur CI/CD yang langsung siap pakai, kami telah menyiapkan seluruh konfigurasi workflow otomatis di dalam direktori **`ci/workflows/`**:
-
-> **Cara mengaktifkan di GitHub:**  
-> Pindahkan atau salin folder `ci/workflows/` menjadi `.github/workflows/` secara langsung via web GitHub (atau hubungkan ulang koneksi GitHub di Arena dengan izin *workflows* diaktifkan).
-
-### 1. Workflow CI & Build Otomatis (`ci/workflows/ci.yml`)
-Workflow CI dirancang untuk berjalan otomatis pada setiap `push`, `pull_request`, dan manual via `workflow_dispatch`:
-- **`protocol-check` (RFC-6455 Protocol Verification)**
-  - Menjalankan pengujian kepatuhan protokol RFC-6455 menggunakan Python 3.11 (`tools/protocol_check.py` melawan `tools/mock_pty_ws_server.py`).
-  - Memvalidasi **9/9 gate protokol lulus 100%**, termasuk simulasi otentikasi `?token=`, kontrol `action`, ubah ukuran (`TIOCSWINSZ`), dan interupsi `Ctrl+C` (`0x03`).
-- **`build-android-apk` (Build Android Kotlin Native UI APK & Lint)**
-  - Menggunakan **Ubuntu Latest** dengan **JDK 17** dan **Gradle 8.7**.
-  - Mengonfigurasi dan membuat Gradle Wrapper secara otomatis di lingkungan CI.
-  - Menjalankan `./gradlew :app:assembleDebug --stacktrace` pada proyek `experimental/zmux-kotlin/`.
-  - **Mengunggah Artefak APK (`zmux-kotlin-debug-apk`)**: Setiap build yang sukses akan menghasilkan artefak APK yang dapat langsung diunduh dari halaman *Actions* di GitHub.
-  - Menjalankan analisis diagnostik **Android Lint** (`:app:lintDebug`) dan mengunggah laporan hasil analisis (`zmux-kotlin-lint-report`).
-- **`ci-summary`**
-  - Menampilkan ringkasan status build dan daftar artefak di *Job Summary* GitHub Actions.
-
-### 2. Workflow Rilis APK (`ci/workflows/release.yml`)
-- Dirancang untuk berjalan saat penanda rilis (tag `v*`) di-push ke repositori.
-- Mem-build aplikasi Android dan menyediakan artefak APK rilis (`zmux-kotlin-release-apk`).
+- **Native Kotlin UI** (`experimental/zmux-kotlin/`) — true-black AMOLED field,
+  ember/teal duotone, tabs, virtual keys. Uses Termux `terminal-view` +
+  `terminal-emulator` as the ANSI parser / screen buffer.
+- **Real PTY shell** — `proot → /bin/sh -l` inside a verified Alpine rootfs.
+  The kernel does line editing, job control and `Ctrl+C`; this is a byte pump,
+  not a fake pipe shell.
+- **Simple prompt `Z$ `** — uncoloured, no invisible-width escape bytes. The
+  directory basename appears only after an explicit `cd` (a `cd()` override),
+  which eliminates the long-command wrap bug class entirely.
+- **Performance-aware seccomp** — PRoot's seccomp accelerator is kept ON when a
+  canary probe proves it works on the device, and only falls back to slow
+  pure-ptrace (`PROOT_NO_SECCOMP=1`) when the kernel needs it (Android 14/15
+  SIGSYS). This is what makes `apk add <pkg>` fast again.
+- **No host config leaks** — DNS is written into the guest's own
+  `/etc/resolv.conf` (public resolvers), never bound from the host. Binds are
+  kept minimal (`/dev /proc /sys` + the user's own home dir).
 
 ---
 
-## 🛡️ Perbaikan "Permission Denied" Total (Android W^X) & Auto-Reopen Linux
-
-Gejala lama saat aplikasi ditutup lalu dibuka lagi:
+## Repository layout
 
 ```
-: /data/user/0/com.zmux.terminal.debug/files/.zmuxrc[1]:
-  /data/user/0/com.zmux.terminal.debug/files/bin/clear: Permission denied
+docs/
+  decisions/   ADRs — why Kotlin for the UI and why not Rust
+  progress/    PoC progress + WebSocket protocol spec
+  analysis/    technical cross-checks (performance, etc.)
+experimental/zmux-kotlin/
+  app/src/main/python/zmux/   Python engine (realpty, linuxenv, python_shell, …)
+  app/src/main/java/          Kotlin UI + Termux terminal wiring
+  tools/                      protocol_check, mock WS server
+  tests/                      pytest suite
+Makefile                      standard dev commands
 ```
 
-**Akar masalah:** APK ini menargetkan SDK 34, dan sejak Android 10 (target SDK 29+) kernel/SELinux melakukan blokir `execve()` untuk *setiap* file reguler di direktori privat aplikasi (`/data/user/0/<pkg>/files/...`) — aturan **W^X**. `chmod 755` tidak menolong; `execve` selalu dijawab `EACCES` → mksh mencetak `Permission denied`. Backend Python memang menulis wrapper CLI (`files/bin/clear`, `help`, `zpip`, ...) dan shell bootstrap Kotlin menaruh `files/bin` di urutan **pertama** `PATH`, sehingga `clear` di `.zmuxrc` menabrak wrapper tersebut.
+### Documentation
 
-**Perbaikan menyeluruh (semua jalur):**
-1. **Shell bootstrap (Kotlin)** — `PATH` kini *system-only* (`/system/bin:/system/xbin:/vendor/bin`); `files/bin` tidak pernah ada di `PATH` sehingga `clear` kembali ke toybox. `linux-setup` tetap jalan lewat interpreter `sh <path>` (membaca file tidak butuh izin exec).
-2. **Auto-reopen lingkungan Alpine** — jika rootfs Alpine sudah terinstal dan terverifikasi (`bin/sh` guest dengan symlink absolut busybox ikut diresolve, marker `etc/.zmux-rootfs`, `libproot.so` executable), `createNewSession()` langsung membuka PTY PRoot → guest `/bin/sh -l`. Pengguna tidak lagi terdampar di shell bootstrap setelah *close/re-open*, dan tab `[+]` baru ikut konsisten.
-3. **Peluncur PRoot Kotlin setara Python** — self-heal SONAME `libtalloc` ke `files/lib`, bind storage hanya untuk path yang benar-benar *readable+executable* (`/sdcard` dsb. dilewati tanpa izin), bind `resolv.conf`, dan mountpoint guest dibuat otomatis.
-4. **Runtime Python** — `zmux.paths.android_exec_blocked()` mendeteksi sandbox W^X: wrapper tetap ditulis + `chmod 0755` (untuk dipakai via interpreter/desktop), tetapi `BIN_DIR` **tidak** lagi di-prepend ke `PATH`, konten lama di `os.environ["PATH"]` di-scrub saat import, dan semua pembangun env (`zmux.env.build_path`, `terminal._build_env`) menjamin tidak ada entri `PATH` milik direktori privat aplikasi.
+- [`docs/decisions/KOTLIN_RUST_DECISION.md`](docs/decisions/KOTLIN_RUST_DECISION.md)
+  — architecture decision: Kotlin for the UI layer, using Termux
+  `terminal-emulator` (Apache-2.0) as the ANSI parser / screen buffer, keeping
+  the Python AGPL-3.0 engine (`realpty.py`, `zpip`, PRoot/Alpine), and **not**
+  adopting Rust.
+- [`docs/progress/PROGRESS_KOTLIN_UI_POC.md`](docs/progress/PROGRESS_KOTLIN_UI_POC.md)
+  — progress report, architecture, and the WebSocket protocol spec.
+- [`docs/analysis/CROSSCHECK_PERFORMANCE.md`](docs/analysis/CROSSCHECK_PERFORMANCE.md)
+  — performance cross-check (`apk add` vs Termux + proot-distro) and the
+  implementation status of the three fixes (seccomp, keyboard resize, prompt).
 
-**Gate pengujian baru** — `tests/test_wx_permission_safety.py` (15 gates): simulasi runtime Android pada interpreter bersih, emulasi resolusi mksh, *eksekusi byte-asli `.zmuxrc` yang diekstrak dari sumber Java* di bawah `bash` dengan direktori `bin` berisi jebakan (negatif-kontrol ikut membuktikan layout lama pasti menembak jebakan), dan kontrak statik kode Kotlin/Java yang terpasang.
+---
+
+## Quickstart & local development
+
+The root [`Makefile`](Makefile) mirrors the CI steps:
 
 ```bash
-make test   # 9/9 protokol + 8/8 installer + 15/15 W^X + 23/23 APP_DIR — semua hijau
-```
-
----
-
-## 📍 Perbaikan "Rootfs path disappeared" (APP_DIR Chaquopy vs `filesDir`)
-
-Gejala: `linux-setup` sukses total (checksum terverifikasi, `rootfs installed and verified
-successfully!`), tetapi layar langsung menampilkan:
-
-```
-[Chaquopy Error] Rootfs path disappeared before PRoot launch:
-/data/user/0/com.zmux.terminal.debug/files/linux/rootfs
-```
-
-**Akar masalah:** Chaquopy bukan python-for-android. Ia tidak pernah menyetel `ANDROID_PRIVATE`/
-`ANDROID_ARGUMENT`/`ANDROID_APP_PATH`, dan mengekstrak sumber Python aplikasi ke
-`<filesDir>/chaquopy/AssetFinder/app`. Akibatnya `zmux.paths.resolve_app_dir()` jatuh ke langkah
-`__file__` (`Path(__file__).parent.parent`), menemukan direktori ekstraksi itu — yang memang
-*writable* — lalu memakainya sebagai `APP_DIR`. Rootfs terpasang di
-`<AssetFinder>/linux/rootfs`, sementara `ZmuxTerminalActivity` mencari di `filesDir`. Ketidakcocokan
-yang sama berlaku untuk **semua** turunan `APP_DIR`: wrapper `bin`, `.zmux_auth_token` (dibaca
-`ZmuxBackendLocator`), `cache`, dan `logs`.
-
-**Perbaikan (satu sumber kebenaran, Kotlin = host yang berwenang):**
-1. **Kontrak `APP_DIR` (Kotlin)** — `ZmuxTerminalActivity.onCreate` mengekspor
-   `Os.setenv("ANDROID_PRIVATE", filesDir, true)` **sebelum** `Python.start()` dan sebelum impor
-   modul `zmux` pertama (`APP_DIR` diresolve saat *import*). Efek samping positif: penjaga W^X
-   (`android_exec_blocked()`) yang sebelumnya diam-diam mati di Chaquopy kini aktif.
-2. **Tidak ada tebakan path di Kotlin** — `launchLinuxSession()` dan `detectInstalledLinux()`
-   meminta `zmux.linuxenv.rootfs_dir()` / `home_dir()`. Pesan galat kini mencetak path yang
-   benar-benar dikembalikan Python, bukan literal buatan tangan.
-3. **Jaring pengaman Python** — `resolve_app_dir()` menolak pohon aset Chaquopy sebagai root
-   runtime; tanpa ekspor host pun `APP_DIR` jatuh ke `HOME` (= `filesDir` di Chaquopy). Jalur p4a
-   (`ANDROID_ARGUMENT`/`ANDROID_APP_PATH`) dan desktop/CI tidak berubah.
-4. **Migrasi instalasi lama** — `linuxenv.migrate_legacy_install()` mengadopsi rootfs yang
-   terdampar di pohon AssetFinder lewat *rename* (satu filesystem, O(1) — tidak pernah menyalin di
-   UI thread), menggabungkan isi `home` lama tanpa menimpa berkas yang sudah ada, membersihkan
-   direktori kosong, dan melaporkan apa pun yang sengaja tidak disentuh. Dipanggil saat startup dan
-   di awal `install()`.
-5. **Kepemilikan berkas di `files/bin`** — karena `APP_DIR` kini sama dengan `filesDir`, generator
-   wrapper Python dan skrip bootstrap Java menulis ke direktori yang sama; skrip host diganti nama
-   menjadi `zmux-linux-setup` sehingga wrapper `linux-setup` bikinan Python tidak bisa lagi
-   menimpanya.
-
-**Gate pengujian baru** — `tests/test_app_dir_alignment.py` (23 gates): reproduksi layout Chaquopy
-apa adanya (probe interpreter bersih dengan `files/chaquopy/AssetFinder/app`), prioritas
-`resolve_app_dir()`, kesetaraan seluruh path yang dikonsumsi Kotlin, migrasi instalasi lama, tabrakan
-nama berkas `files/bin`, serta kontrak statik sumber Kotlin (tanpa literal `linux/rootfs`, path dari
-`linuxenv`, urutan `Os.setenv` sebelum `Python.start`). Suite ini juga ikut dijalankan otomatis dari
-`tests/test_wx_permission_safety.py` (protokol `load_tests`, gagal keras bila filenya hilang),
-sehingga langkah CI yang sudah ada tetap memverifikasinya.
-
----
-
-## 🛠️ Quickstart & Local Development
-
-Untuk kenyamanan pengembangan lokal dan kesetaraan dengan lingkungan CI, repositori ini dilengkapi dengan **`Makefile`** di root direktori:
-
-```bash
-# 1. Menjalankan verifikasi kepatuhan protokol RFC-6455 (9/9 gate lulus)
+# 1. Run RFC-6455 protocol conformance + rootfs-installer + W^X + APP_DIR checks
 make test
 
-# 2. Mem-build aplikasi Android (APK Debug) di experimental/zmux-kotlin/
+# 2. Build the Android Debug APK in experimental/zmux-kotlin/ (needs JDK 17 + Android SDK)
 make build
 
-# 3. Menjalankan analisis Android Lint
+# 3. Run Android Lint
 make lint
 
-# 4. Membersihkan artefak build
+# 4. Clean build outputs
 make clean
 ```
 
-### Memeriksa Protokol Secara Manual (Tanpa Make)
+`make test` currently runs:
+- **protocol-check** — RFC-6455 conformance (9/9 gates): `?token=` auth, `action`
+  control, `TIOCSWINSZ` resize, `Ctrl+C` (`0x03`) interrupt.
+- **linuxenv-test** — Linux rootfs installer regression.
+- **wx-safety-test** — W^X / "Permission denied" safety gates.
+- **app-dir-test** — APP_DIR alignment gates (Chaquopy AssetFinder / rootfs location).
+
+### Manual protocol check (without Make)
+
 ```bash
 python3 experimental/zmux-kotlin/tools/mock_pty_ws_server.py --port 8011 --token dev &
 python3 experimental/zmux-kotlin/tools/protocol_check.py --port 8011 --token dev
@@ -139,13 +100,106 @@ python3 experimental/zmux-kotlin/tools/protocol_check.py --port 8011 --token dev
 
 ---
 
-## 📂 Struktur Repositori & Referensi Dokumentasi
+## CI / CD
 
-- [`docs/KOTLIN_RUST_DECISION.md`](docs/KOTLIN_RUST_DECISION.md)  
-  Analisis dan keputusan arsitektur: menggunakan **Kotlin untuk lapisan UI** dan memanfaatkan `terminal-emulator` Termux (Apache-2.0) sebagai parser ANSI & buffer layar, sekaligus mempertahankan engine **Python AGPL-3.0** (`realpty.py`, `zpip`, PRoot/Alpine) tanpa adopsi Rust.
-- [`docs/PROGRESS_KOTLIN_UI_POC.md`](docs/PROGRESS_KOTLIN_UI_POC.md)  
-  Laporan kemajuan, skema arsitektur, dan spesifikasi protokol WebSocket ZMUX.
-- [`experimental/zmux-kotlin/`](experimental/zmux-kotlin/)  
-  Implementasi PoC aplikasi Android Kotlin Native UI (*ZMUX Ember*), termasuk kontrak protokol (`ZmuxProtocol.kt`), jembatan WebSocket (`WebSocketPtyBridge.kt`), sesi terminal tanpa fork lokal (`ZmuxTerminalSession.kt`), serta tombol virtual (`ZmuxKeys.kt`).
-- [`Makefile`](Makefile)  
-  Perintah standar pengembangan untuk pengujian protokol dan build aplikasi.
+Workflows live in [`ci/workflows/`](ci/workflows/) (and are mirrored to
+`.github/workflows/` where the GitHub App has `workflows` permission):
+
+- **`ci.yml`** — runs on `push`, `pull_request`, and `workflow_dispatch`:
+  - `protocol-check` — RFC-6455 conformance (9/9 gates).
+  - `build-android-apk` — Gradle 8.7 / JDK 17 `:app:assembleDebug`, uploads the
+    `zmux-kotlin-debug-apk` artifact, and runs `:app:lintDebug` (uploads
+    `zmux-kotlin-lint-report`).
+  - `ci-summary` — build status + artifact list in the GitHub Actions summary.
+- **`release.yml`** — builds and uploads a release APK (`zmux-kotlin-release-apk`)
+  when a `v*` tag is pushed.
+
+> **Note:** the GitHub App connection in Arena currently lacks the `workflows`
+> permission, which is why workflow files are also kept under `ci/workflows/`.
+> To activate CI on GitHub, copy `ci/workflows/` to `.github/workflows/` (or
+> reconnect the GitHub App with `workflows` permission enabled).
+
+---
+
+## Development history & engineering notes (archive)
+
+These sections record the problems that shaped the current design. They are
+kept as a trail (honesty principle), not as the current "about" text.
+
+### Android W^X ("Permission denied") + auto-reopen Alpine
+
+Old symptom when reopening the app:
+
+```
+: /data/user/0/com.zmux.terminal.debug/files/.zmuxrc[1]:
+  /data/user/0/com.zmux.terminal.debug/files/bin/clear: Permission denied
+```
+
+**Root cause:** the APK targets SDK 34, and since Android 10 (target SDK 29+)
+the kernel/SELinux blocks `execve()` of every regular file in the app-private
+directory (`/data/user/0/<pkg>/files/...`) — the **W^X** rule. `chmod 755` does
+not help; `execve` always returns `EACCES`. The Python backend wrote CLI
+wrappers under `files/bin`, and the bootstrap shell had `files/bin` first on
+`PATH`, so `clear` in `.zmuxrc` hit that wrapper.
+
+**Fix (all paths):**
+1. **Kotlin bootstrap shell** — `PATH` is now system-only
+   (`/system/bin:/system/xbin:/vendor/bin`); `files/bin` never appears on
+   `PATH`. `linux-setup` still runs via `sh <path>` (interpreter only needs to
+   *read* the file).
+2. **Auto-reopen Alpine** — if a verified rootfs exists (`bin/sh` with busybox
+   absolute symlinks resolved, `etc/.zmux-rootfs` marker, executable
+   `libproot.so`), `createNewSession()` opens `proot → guest /bin/sh -l`
+   directly, so the user is no longer stranded in the bootstrap shell after
+   close/reopen.
+3. **Kotlin proot launcher matches Python** — `libtalloc` SONAME self-heal,
+   storage binds only for actually readable+executable paths, guest
+   mountpoints auto-created.
+4. **Python runtime** — `zmux.paths.android_exec_blocked()` detects the W^X
+   sandbox: wrappers are still written + `chmod 0755` (for interpreter/desktop
+   use), but `BIN_DIR` is no longer prepended to `PATH`, and stale app-private
+   `PATH` entries are scrubbed on import.
+
+**Test gates:** `tests/test_wx_permission_safety.py` (15 gates), including
+executing the actual `.zmuxrc` bytes extracted from the Java source under a
+trap-filled `bin` dir (negative control proves the old layout hits the trap).
+
+### "Rootfs path disappeared" (APP_DIR Chaquopy vs filesDir)
+
+Old symptom:
+
+```
+[Chaquopy Error] Rootfs path disappeared before PRoot launch:
+/data/user/0/com.zmux.terminal.debug/files/linux/rootfs
+```
+
+**Root cause:** Chaquopy is not python-for-android; it does not set
+`ANDROID_PRIVATE`/`ANDROID_ARGUMENT`/`ANDROID_APP_PATH`, and it extracts app
+Python sources to `<filesDir>/chaquopy/AssetFinder/app`. `resolve_app_dir()`
+fell back to the `__file__`-based path, so the rootfs was installed under the
+AssetFinder tree while Kotlin looked under `filesDir`.
+
+**Fix:**
+1. **APP_DIR contract (Kotlin)** — `ZmuxTerminalActivity.onCreate` exports
+   `Os.setenv("ANDROID_PRIVATE", filesDir, true)` **before** `Python.start()`
+   (APP_DIR is resolved at import time).
+2. **No guessed paths in Kotlin** — `launchLinuxSession()` /
+   `detectInstalledLinux()` ask `zmux.linuxenv` for the real `rootfs_dir()` /
+   `home_dir()`.
+3. **Python safety net** — `resolve_app_dir()` refuses the Chaquopy asset tree
+   as the runtime root; without a host export it falls back to `HOME`
+   (= `filesDir` under Chaquopy).
+4. **Legacy install migration** — `linuxenv.migrate_legacy_install()` adopts a
+   stranded rootfs via rename (O(1), never copies on the UI thread), merges old
+   `home` contents without overwriting, and reports what it deliberately leaves
+   alone.
+
+**Test gates:** `tests/test_app_dir_alignment.py` (23 gates), also auto-run from
+`tests/test_wx_permission_safety.py` via `load_tests`.
+
+---
+
+## License
+
+Engine is AGPL-3.0. Termux is used as Apache-2.0 Maven artifacts
+(`terminal-view`, `terminal-emulator`), not as a copy of the GPLv3 app.
