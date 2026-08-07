@@ -48,16 +48,10 @@ public class TerminalSessionHelper {
             fw.write("echo ''\n");
             fw.write("echo '(Type " + esc + "[34mlinux-setup" + esc + "[0m to install Alpine Linux)'\n");
             fw.write("echo '" + esc + "[33m=================================================" + esc + "[0m'\n");
-            // mksh prompt-width contract (see mksh(1), PS1): the line editor
-            // counts printable characters to know where the screen edge is,
-            // so raw colour escape codes make it believe the prompt is ~31
-            // columns wider than it looks and commands wrap a few letters
-            // early ("command kepotong pindah baris"). The ksh88 convention:
-            // start with <DELIM><CR> and bracket every non-printing sequence
-            // between two DELIMs; inside pairs, nothing is printed or
-            // counted. mksh has no \w — use $PWD, which mksh re-expands on
-            // every prompt. \001 is the conventional, already-unused DELIM.
-            fw.write("export PS1='\001\r\001" + esc + "[1;38;5;202m\001ZMUX\001" + esc + "[0m\001:\001" + esc + "[38;5;80m\001$PWD\001" + esc + "[0m\001$ '\n");
+            // Simple prompt during the pre-Alpine setup phase, matching the
+            // Alpine shell. No colour escapes, so mksh's line editor counts
+            // exactly the visible width and commands never wrap early.
+            fw.write("export PS1='Z$ '\n");
             fw.write("alias ls='ls --color=auto'\n");
             fw.write("alias clear='clear; printf \"\\033[3J\"'\n");
             // Android 10+ W^X: files/bin/* can never be execve()'d directly, so
@@ -281,28 +275,36 @@ public class TerminalSessionHelper {
         try {
             java.io.File profileD = new java.io.File(rootfs, "etc/profile.d");
             profileD.mkdirs();
-            // The \033 octal text survives single quotes; busybox ash
-            // (bb_process_escape_sequence in lineedit.c) and bash turn it into
-            // ESC when the prompt is drawn.
-            String esc = "\\033";
-            // Bracket every non-printing sequence in \[ \]. Busybox ash
-            // line editing (parse_and_put_prompt) and bash/readline honour only
-            // these markers; without them ash counts the 31 invisible bytes of
-            // the colour codes as prompt width, so on a ~38-column phone every
-            // long command wraps a few letters too early (the wrap bug).
-            String ps1 = "\\[" + esc + "[1;38;5;202m\\]ZMUX"
-                    + "\\[" + esc + "[0m\\]:"
-                    + "\\[" + esc + "[38;5;80m\\]\\w"
-                    + "\\[" + esc + "[0m\\]\\$ ";
+            // Simple, uncoloured prompt: default 'Z$ '. The current directory
+            // basename appears only after an explicit `cd` (a cd() override
+            // writes a literal PS1, so it works even on busybox ash builds
+            // without ASH_EXPAND_PRMT). No colour escapes => no invisible
+            // width bytes => the long-command wrap bug is gone entirely.
+            // Must stay byte-for-byte identical to the Python
+            // linuxenv._write_guest_prompt version (both write this file).
+            String script =
+                    "# Managed by ZMUX — simple prompt (no colour).\n"
+                    + "# Default 'Z$ '. The dir basename appears only after `cd`;\n"
+                    + "# cd back to $HOME or / to restore 'Z$ '.\n"
+                    + "cd() {\n"
+                    + "  command cd \"$@\" || return 1\n"
+                    + "  if [ \"$PWD\" = \"$HOME\" ] || [ \"$PWD\" = \"/\" ]; then\n"
+                    + "    PS1='Z$ '\n"
+                    + "  else\n"
+                    + "    PS1=\"Z:${PWD##*/}\\$ \"\n"
+                    + "  fi\n"
+                    + "}\n"
+                    + "PS1='Z$ '\n"
+                    + "export PS1\n" ;
             java.nio.file.Files.write(
                     new java.io.File(profileD, "zmux-prompt.sh").toPath(),
-                    ("# Managed by ZMUX — branded prompt.\n"
-                            + "PS1='" + ps1 + "'\n"
-                            + "export PS1\n")
-                            .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                    script.getBytes(java.nio.charset.StandardCharsets.UTF_8));
         } catch (Exception ignored) {
         }
     }
+
+
+
 
     /**
      * Drop a small static MOTD into /etc/profile.d. Pure echo/cat, no extra
@@ -373,6 +375,83 @@ public class TerminalSessionHelper {
             target.setExecutable(true, false);
         } catch (Exception ignored) {
         }
+    }
+
+    // Cache for the seccomp canary probe (null = not yet computed). Accessed
+    // from both the UI thread (read) and a background probe thread (write), so
+    // it is volatile and only ever set (never un-set).
+    private static volatile Boolean seccompProbeCache = null;
+    private static final Object seccompProbeLock = new Object();
+
+    /**
+     * Start the seccomp canary probe once per process, on a background thread.
+     *
+     * Some Android kernels (esp. Android 14/15) deliver a fatal SIGSYS ("Bad
+     * system call") to proot's tracees when the seccomp accelerator is active.
+     * But disabling it (PROOT_NO_SECCOMP=1) forces pure-ptrace, which is far
+     * slower — the ~20s vs <1s `apk add` regression. So instead of hardcoding
+     * the disable, we probe once per process WITH seccomp enabled: if a tiny
+     * canary child (proot -> /bin/true) exits 0 the accelerator works and we
+     * keep it (fast); a non-zero exit or a timeout means we need the toggle
+     * (stable). Mirrors the Python probe in linuxenv._seccomp_probe_broken.
+     *
+     * The probe is intentionally asynchronous: the canary can hang for up to
+     * `timeout` seconds on a kernel that needs seccomp off, and running that
+     * synchronously on the UI thread (where sessions are created) would ANR.
+     * Callers read the cached result via {@link #isSeccompBroken()} and fall
+     * back to a conservative (seccomp-off) default until the probe finishes.
+     * Idempotent and thread-safe; safe to call from any thread, any number of
+     * times.
+     */
+    public static void warmSeccompProbe(String prootPath, String nativeLibraryDir, String rootfsDir, String filesDir) {
+        if (seccompProbeCache != null) return;
+        synchronized (seccompProbeLock) {
+            if (seccompProbeCache != null) return;
+            new Thread(() -> {
+                seccompProbeCache = runSeccompProbe(prootPath, nativeLibraryDir, rootfsDir, filesDir);
+            }, "zmux-seccomp-probe").start();
+        }
+    }
+
+    private static boolean runSeccompProbe(String prootPath, String nativeLibraryDir, String rootfsDir, String filesDir) {
+        boolean broken = true; // conservative: only trust seccomp after a clean run
+        try {
+            java.io.File rootfs = new java.io.File(rootfsDir);
+            if (prootPath != null && new java.io.File(prootPath).canExecute() && rootfs.isDirectory()) {
+                java.io.File cache = new java.io.File(filesDir, "cache");
+                String loader = new java.io.File(nativeLibraryDir, "libproot-loader.so").getAbsolutePath();
+                String[] cmd = new String[] { prootPath, "-r", rootfs.getAbsolutePath(), "/bin/true" };
+                String[] envp = new String[] {
+                    "LD_LIBRARY_PATH=" + nativeLibraryDir,
+                    "PROOT_LOADER=" + loader,
+                    "PROOT_TMP_DIR=" + cache.getAbsolutePath(),
+                    "HOME=/root",
+                    "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                };
+                Process p = Runtime.getRuntime().exec(cmd, envp);
+                boolean finished = p.waitFor(10, java.util.concurrent.TimeUnit.SECONDS);
+                if (finished) {
+                    broken = p.exitValue() != 0;
+                } else {
+                    p.destroy(); // hang => seccomp unusable on this kernel
+                    broken = true;
+                }
+            }
+        } catch (Exception e) {
+            broken = true;
+        }
+        return broken;
+    }
+
+    /**
+     * Non-blocking read of the probe result. Returns true (conservative: keep
+     * PROOT_NO_SECCOMP=1) when the probe has not finished yet, so the first
+     * session may briefly run in the slower pure-ptrace mode until the probe
+     * completes; subsequent sessions get the fast path. Never blocks the UI.
+     */
+    private static boolean isSeccompBroken() {
+        Boolean cached = seccompProbeCache;
+        return cached == null || cached;
     }
 
     public static TerminalSession createLinuxSession(
@@ -466,15 +545,13 @@ public class TerminalSessionHelper {
         args.add("/bin/sh");
         args.add("-l");
 
-        // Fallback prompt only. The real prompt is installed at
-        // /etc/profile.d/zmux-prompt.sh by ensureGuestPrompt so it wins over
-        // Alpine's /etc/profile default. Same \[ \] contract as that file:
-        // busybox ash/bash line editors must not count the 31 invisible
-        // bytes of the colour codes, or long commands wrap a few letters
-        // early on phone-width screens.
-        String ps1 = "\\[\033[1;38;5;202m\\]ZMUX\\[\033[0m\\]:\\[\033[38;5;80m\\]\\w\\[\033[0m\\]\\$ ";
+        // Fallback prompt only. The real prompt (with the `cd` override) is
+        // installed at /etc/profile.d/zmux-prompt.sh by ensureGuestPrompt so
+        // it wins over Alpine's /etc/profile default. Plain 'Z$ ' here is a
+        // harmless default for any shell that starts without sourcing it.
+        String ps1 = "Z$ ";
 
-        String[] env = new String[] {
+        java.util.List<String> envList = new java.util.ArrayList<>(java.util.Arrays.asList(
             "HOME=/root",
             "USER=zmux",
             "LOGNAME=zmux",
@@ -485,11 +562,17 @@ public class TerminalSessionHelper {
             "PS1=" + ps1,
             "LD_LIBRARY_PATH=" + ldLibraryPath,
             "PROOT_LOADER=" + loader,
-            "PROOT_TMP_DIR=" + cache.getAbsolutePath(),
-            // Avoid SIGSYS ("Bad system call") on kernels whose seccomp
-            // filter rejects proot's accelerator (Android 14/15).
-            "PROOT_NO_SECCOMP=1",
-        };
+            "PROOT_TMP_DIR=" + cache.getAbsolutePath()
+        ));
+        // Keep the seccomp accelerator ON (fast) whenever a canary probe proves
+        // it works on this kernel; only fall back to pure ptrace (slow but
+        // stable) when the probe fails or has not finished yet. The probe is
+        // started asynchronously (see warmSeccompProbe) so this never blocks.
+        warmSeccompProbe(prootPath, nativeLibraryDir, rootfsDir, filesDir);
+        if (isSeccompBroken()) {
+            envList.add("PROOT_NO_SECCOMP=1");
+        }
+        String[] env = envList.toArray(new String[0]);
         // 80x24 default; real cols/rows are propagated from TerminalView
         // after layout via updateSize(). See createLocalSession() for why
         // this must not be 2000.

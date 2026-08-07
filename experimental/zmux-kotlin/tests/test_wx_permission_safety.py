@@ -291,7 +291,7 @@ class KotlinShellContractTests(unittest.TestCase):
         self.assertIn("8.8.8.8", resolv_block)
         self.assertIn("1.1.1.1", resolv_block)
 
-    def test_guest_prompt_is_branded_in_profile_d(self) -> None:
+    def test_guest_prompt_is_simple_in_profile_d(self) -> None:
         # The "localhost:~#" prompt came from Alpine's /etc/profile default
         # overwriting our env PS1. We now drop a script in /etc/profile.d
         # which busybox ash sources *after* that default.
@@ -299,12 +299,16 @@ class KotlinShellContractTests(unittest.TestCase):
         prompt_block = self._method_block(self.helper_src, "ensureGuestPrompt")
         self.assertIn("etc/profile.d", prompt_block)
         self.assertIn("zmux-prompt.sh", prompt_block)
-        # Line-wrap contract: every colour escape must sit inside \[ \] so
-        # busybox ash (parse_and_put_prompt) and bash/readline measure the
-        # prompt at its visible width instead of adding ~31 phantom columns.
-        self.assertIn("202m\\\\]ZMUX", prompt_block)
-        self.assertIn("[1;38;5;202m", prompt_block)
-        self.assertNotIn("202mZMUX", prompt_block)
+        # Prompt is deliberately simple and uncoloured: no colour escapes, so
+        # there are no invisible-width bytes for busybox ash / bash to miscount
+        # (the old "long command wraps a few letters early" bug). The dir
+        # basename appears only after an explicit `cd` via a cd() override.
+        self.assertNotIn("202m", prompt_block)
+        self.assertNotIn("[1;38;5;202m", prompt_block)
+        self.assertNotIn("ZMUX:", prompt_block)
+        self.assertIn("PS1='Z$ '", prompt_block)
+        self.assertIn("command cd", prompt_block)
+        self.assertIn("PWD##*/", prompt_block)
         self.assertNotIn("ZMUX@", prompt_block)
         self.assertNotIn("localhost:~", prompt_block)
 

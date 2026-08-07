@@ -10,7 +10,7 @@ libraries, talking to the **existing Python ZMUX backend over WebSocket**.
 > **Why Kotlin but not Rust:** adopting `terminal-view` also gives us Termux'
 > `terminal-emulator` (ANSI parser, grid, scrollback) under Apache-2.0 — which is precisely the
 > ~5,500 lines Rin's Rust core exists to provide. Kotlin removes the last reason to add Rust.
-> Full reasoning in [`docs/KOTLIN_RUST_DECISION.md`](../../docs/KOTLIN_RUST_DECISION.md).
+> Full reasoning in [`docs/decisions/KOTLIN_RUST_DECISION.md`](../../docs/decisions/KOTLIN_RUST_DECISION.md).
 
 ---
 

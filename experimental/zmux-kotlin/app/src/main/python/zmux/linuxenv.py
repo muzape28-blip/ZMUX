@@ -557,16 +557,15 @@ def _ensure_talloc_compat(lib_dir: str) -> str | None:
     return None
 
 
-def proot_env() -> dict:
-    """Extra environment variables every proot child needs."""
+def _base_proot_env() -> dict:
+    """Extra environment variables every proot child needs, minus the
+    seccomp decision (see :func:`proot_env`). Splitting these lets the
+    canary probe exercise proot *with* the seccomp accelerator, while the
+    real children get the toggle only when the probe proved it is needed.
+    """
     extra: dict = {
         "PATH": GUEST_PATH,
         "HOME": GUEST_HOME,
-        # Some Android kernels (esp. Android 14/15) deliver a fatal SIGSYS
-        # ("Bad system call") to proot's tracees when proot uses its seccomp
-        # accelerator. Disabling it keeps guests working; proot falls back to
-        # pure ptrace.
-        "PROOT_NO_SECCOMP": "1",
     }
     if _is_android():
         lib_dir = native_library_dir() or ""
@@ -592,6 +591,53 @@ def proot_env() -> dict:
         if binary:
             neighbor = os.path.dirname(os.path.realpath(binary))
             extra["LD_LIBRARY_PATH"] = neighbor
+    return extra
+
+
+_SECCOMP_PROBE_CACHE: bool | None = None
+
+
+def _seccomp_probe_broken() -> bool:
+    """Return True when proot's seccomp accelerator fails on this kernel.
+
+    Android 14/15 kernels can deliver a fatal SIGSYS ("Bad system call") to
+    proot's tracees when the seccomp accelerator is active. Running proot in
+    pure-ptrace mode is dramatically slower (the 20s vs <1s `apk add`
+    regression), so we only pay that cost when a real probe proves seccomp
+    is unusable here. The probe is a tiny canary child (``proot -> /bin/true``)
+    executed *with* seccomp enabled and a short timeout; a non-zero exit or a
+    hang means the kernel needs ``PROOT_NO_SECCOMP=1``. The result is cached
+    for the process lifetime so it runs at most once.
+    """
+    global _SECCOMP_PROBE_CACHE
+    if _SECCOMP_PROBE_CACHE is not None:
+        return _SECCOMP_PROBE_CACHE
+    broken = True  # conservative default: only trust seccomp after a clean run
+    try:
+        if _is_android() and is_installed():
+            argv = build_proot_argv(["/bin/true"], HOME_DIR)
+            env = dict(os.environ)
+            env.update(_base_proot_env())  # deliberately NO PROOT_NO_SECCOMP
+            # A SIGSYS can surface as a fast nonzero exit or a silent hang;
+            # both must disable the accelerator. 10s bounds the probe.
+            result = subprocess.run(argv, capture_output=True, timeout=10, env=env)
+            broken = result.returncode != 0
+    except Exception:
+        broken = True
+    _SECCOMP_PROBE_CACHE = broken
+    return broken
+
+
+def proot_env() -> dict:
+    """Extra environment variables every proot child needs.
+
+    Keeps the seccomp accelerator ON (fast) whenever a probe proves it works
+    on this kernel, and only falls back to ``PROOT_NO_SECCOMP=1`` (pure
+    ptrace, slow but stable) when the probe fails. See :func:`_seccomp_probe_broken`.
+    """
+    extra = _base_proot_env()
+    if _seccomp_probe_broken():
+        extra["PROOT_NO_SECCOMP"] = "1"
     return extra
 
 
@@ -697,33 +743,39 @@ def _ensure_guest_resolv_conf(root: Path | None = None) -> None:
 
 
 def _write_guest_prompt(root: Path | None = None) -> None:
-    """Install the branded PS1 that wins over Alpine's /etc/profile default.
+    """Install a simple, uncoloured prompt that wins over Alpine's profile.
 
-    Alpine's busybox ash sources /etc/profile, which sets a hostname-based
-    prompt (``localhost:~#``) and then sources every /etc/profile.d/*.sh.
-    Dropping our own script there overrides it reliably regardless of HOME.
-    Every sequence that does not print is wrapped in \\[ \\] —
-    the only markers busybox ash (libbb/lineedit.c parse_and_put_prompt)
-    and bash/readline honour. Without them ash counts the 31 invisible
-    CSI bytes as prompt width and long commands wrap a few letters early
-    on phone-width screens (the wrong-wrap bug). The prompt is
-    ``ZMUX:<path>$`` with the brand in ember and the path in teal.
+    Default prompt is ``Z$ ``. The current-directory basename appears only
+    after an explicit ``cd``: a ``cd()`` override writes a *literal* PS1 (so
+    it works even on busybox ash builds without ``ASH_EXPAND_PRMT``). There
+    are no colour escapes and therefore no invisible width bytes, which
+    eliminates the long-command wrap bug entirely.
+
+    The script written here must stay byte-for-byte identical to the Java
+    ``TerminalSessionHelper.ensureGuestPrompt`` version (both write
+    ``/etc/profile.d/zmux-prompt.sh``; the Java heal runs on every launch and
+    would otherwise overwrite this one).
     """
     root = root or rootfs_dir()
     profile_d = root / "etc" / "profile.d"
     profile_d.mkdir(parents=True, exist_ok=True)
-    esc = "\033"
-    ps1 = (
-        f"\\[{esc}[1;38;5;202m\\]ZMUX\\[{esc}[0m\\]:"
-        f"\\[{esc}[38;5;80m\\]\\w\\[{esc}[0m\\]\\$ "
+    script = (
+        "# Managed by ZMUX \u2014 simple prompt (no colour).\n"
+        "# Default 'Z$ '. The dir basename appears only after `cd`;\n"
+        "# cd back to $HOME or / to restore 'Z$ '.\n"
+        "cd() {\n"
+        "  command cd \"$@\" || return 1\n"
+        "  if [ \"$PWD\" = \"$HOME\" ] || [ \"$PWD\" = \"/\" ]; then\n"
+        "    PS1='Z$ '\n"
+        "  else\n"
+        "    PS1=\"Z:${PWD##*/}\\$ \"\n"
+        "  fi\n"
+        "}\n"
+        "PS1='Z$ '\n"
+        "export PS1\n"
     )
     try:
-        (profile_d / "zmux-prompt.sh").write_text(
-            "# Managed by ZMUX — branded prompt.\n"
-            f"PS1='{ps1}'\n"
-            "export PS1\n",
-            encoding="utf-8",
-        )
+        (profile_d / "zmux-prompt.sh").write_text(script, encoding="utf-8")
     except OSError:
         pass
 
@@ -828,7 +880,7 @@ def ensure_user_home_layout() -> None:
     """Create the persistent guest-facing workspace.
 
     ``HOME_DIR`` is bind-mounted as /root, so this directory survives rootfs
-    repair/reinstall and APK upgrades. The branded prompt itself lives in
+    repair/reinstall and APK upgrades. The simple prompt lives in
     /etc/profile.d (see _write_guest_prompt) so it wins over Alpine's default
     PS1 and does not require touching the user's own ~/.profile.
     """
@@ -840,9 +892,9 @@ def interactive_env() -> dict:
     """Environment for the interactive PTY shell.
 
     proot_env() gives PATH/HOME/LD_LIBRARY_PATH (the loader contract for
-    Android); TERM + LANG make TUI programs render correctly. The branded
-    prompt is set via /etc/profile.d, this PS1 is only a fallback for shells
-    started without sourcing /etc/profile.
+    Android); TERM + LANG make TUI programs render correctly. The simple
+    prompt is set via /etc/profile.d (with the `cd` override); this PS1 is
+    only a fallback for shells started without sourcing /etc/profile.
     """
     ensure_user_home_layout()
     if is_installed():
@@ -855,11 +907,7 @@ def interactive_env() -> dict:
     env["SHELL"] = "/bin/sh"
     env["USER"] = "zmux"
     env["LOGNAME"] = "zmux"
-    esc = "\033"
-    env["PS1"] = (
-        f"\\[{esc}[1;38;5;202m\\]ZMUX\\[{esc}[0m\\]:"
-        f"\\[{esc}[38;5;80m\\]\\w\\[{esc}[0m\\]\\$ "
-    )
+    env["PS1"] = "Z$ "
     return env
 
 

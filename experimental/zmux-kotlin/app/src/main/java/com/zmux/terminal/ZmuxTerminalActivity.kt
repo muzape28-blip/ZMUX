@@ -2,6 +2,8 @@ package com.zmux.terminal
 
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.ViewGroup
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
@@ -38,6 +40,22 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
     private val sessions = mutableListOf<ZmuxTerminalSession>()
     private var activeSessionIndex = 0
     private var ctrlKeyCap: KeyCapView? = null
+
+    /**
+     * Debounce window for propagating a view size change to the PTY.
+     *
+     * With `windowSoftInputMode="adjustResize"` the view is laid out on every
+     * frame of the IME show/hide animation, so a naive layout listener would
+     * call `updateSize()` (and reflow the terminal buffer + issue TIOCSWINSZ)
+     * many times in quick succession. Each intermediate reflow can leave the
+     * cursor a few rows above the bottom — the "prompt jumps 4-5 lines when
+     * the keyboard closes" bug. Resizing only once after the view settles
+     * makes the buffer reflow exactly once to the final size, keeping the
+     * cursor pinned to the bottom row.
+     */
+    private val resizeHandler = Handler(Looper.getMainLooper())
+    private val resizeRunnable = Runnable { terminalView.updateSize() }
+    private val resizeDebounceMs = 100L
 
     /** One rootfs operation at a time, even if terminal title sequences repeat. */
     private val installInProgress = AtomicBoolean(false)
@@ -136,19 +154,13 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
         terminalView.isFocusableInTouchMode = true
 
         terminalView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-            // Propagate the real pixel-based cell size to the PTY every time
-            // the view is laid out (first layout, rotation, keyboard show,
-            // tab switch). The Termux TerminalView.updateSize() computes
-            // cols/rows from the measured font metrics and calls
-            // session.updateSize() which issues TIOCSWINSZ on the PTY.
-            //
-            // This is the bug that made `apk add python3` look "broken":
-            // attachSession() ran before the view had a non-zero size, so the
-            // PTY never learned the actual ~38-40 column phone width and line
-            // editing wrapped at the wrong place. (The old 2000 constructor
-            // argument was transcript scrollback lines, never a width — the
-            // prompt colouring, not the buffer size, caused early wrapping.)
-            terminalView.updateSize()
+            // Debounce: the IME show/hide animation fires many layout passes.
+            // Resizing the PTY once after the view settles (rather than on
+            // every frame) keeps the terminal buffer from reflowing repeatedly,
+            // which is what shoved the running prompt several lines up. Still
+            // covers first layout, rotation, keyboard show/hide and tab switch.
+            resizeHandler.removeCallbacks(resizeRunnable)
+            resizeHandler.postDelayed(resizeRunnable, resizeDebounceMs)
         }
 
         // Re-apply the size once the view hierarchy has been measured. The
@@ -363,6 +375,17 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
 
         val proot = java.io.File(applicationInfo.nativeLibraryDir, "libproot.so")
         if (!proot.isFile || !proot.canExecute()) return null
+
+        // Pre-warm the seccomp canary probe here (this method runs on a
+        // background thread) so that by the time the linux session is created
+        // on the UI thread the result is usually cached and the first session
+        // already uses the fast seccomp path. Idempotent and non-blocking.
+        TerminalSessionHelper.warmSeccompProbe(
+            proot.absolutePath,
+            applicationInfo.nativeLibraryDir,
+            rootfs.absolutePath,
+            filesDir.absolutePath,
+        )
 
         // Wrong-arch guard: an armv7 guest left by an older build under a
         // 64-bit kernel makes dynamically linked binaries (apk, git…) hang
