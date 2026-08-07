@@ -14,8 +14,15 @@ Apache-2.0) with the logic kept identical so the same artefacts are produced:
                            matching) can resolve it from nativeLibraryDir
 
 Sources are pinned and re-downloaded on every build (never vendored):
-    PRoot   termux/proot @ 4dba3afbf3a63af89b4d9c1a59bf2bda10f4d10f
-            (the exact commit Kai pins)
+    PRoot   termux/proot @ a89b3732ec6ae1db674510f0843b2f3db54d0a2f
+            (tag v5.1.107.89 — the exact build termux-packages ships,
+            including on arm32 devices). Kai's 4dba3af ("Add clone3") is
+            the INTRODUCTION of clone3 emulation; on 32-bit ARM it broke
+            deeper fork/exec chains with ENOSYS ("can't execute 'sh':
+            Function not implemented") and silent hangs. Fixes landed
+            later (incl. cd02c79e "restore SYSARG_1 after synthesized
+            sysexit on ARM SIGSYS path" and the clone_stripped_newns and
+            netlink series), all present in v5.1.107.89.
     talloc  deepin-community/talloc @ 2.4.2-1deepin1 (full upstream source
             mirror of talloc 2.4.2, Samba waf build)
 
@@ -41,7 +48,7 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
-PROOT_COMMIT = "4dba3afbf3a63af89b4d9c1a59bf2bda10f4d10f"
+PROOT_COMMIT = "a89b3732ec6ae1db674510f0843b2f3db54d0a2f"  # v5.1.107.89
 TALLOC_TAG = "2.4.2-1deepin1"
 MIN_API = 26
 ABI_TRIPLES = {

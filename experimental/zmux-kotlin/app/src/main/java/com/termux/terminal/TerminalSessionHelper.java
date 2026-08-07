@@ -337,10 +337,11 @@ public class TerminalSessionHelper {
 
     /**
      * Install /usr/local/bin/zmux-doctor inside the guest. It answers the
-     * "commands hang silently after install" class: every probe runs under
-     * a 3s timeout, so the LAST [doctor] RUN: line printed before a freeze
-     * names the broken syscall path (stat, urandom, DNS, musl loader, apk).
-     * Must mirror linuxenv._write_guest_doctor.
+     * "commands hang silently after install" class. Every probe is a DIRECT
+     * executable under a 3s timeout — no `sh -c` wrapper (on broken 32-bit
+     * kernels that wrapper itself dies with ENOSYS and hides the evidence).
+     * Printed DIAG lines classify the signature: HANG (rc=124) vs
+     * EXEC-DEPTH-ENOSYS. Must mirror linuxenv._write_guest_doctor.
      */
     private static void ensureGuestDoctor(java.io.File rootfs) {
         try {
@@ -350,21 +351,23 @@ public class TerminalSessionHelper {
             String content =
                     "#!/bin/sh\n"
                     + "# Managed by ZMUX — guest self-diagnostics for the 'commands hang\n"
-                    + "# silently' class. The LAST 'RUN:' line before a freeze is the\n"
-                    + "# broken syscall path — screenshot it and report.\n"
-                    + "say() { printf '\033[36m[doctor]\033[0m %s\\n' \"$1\"; }\n"
-                    + "runi() { say \"RUN: $1\"; out=$(timeout 3 sh -c \"$1\" 2>&1); rc=$?; printf '%s\\n' \"$out\" | head -3 | sed 's/^/    /'; say \"rc=$rc (124=TIMEOUT/HANG)\"; }\n"
+                    + "# silently' class. The LAST [doctor] RUN: line before a freeze plus\n"
+                    + "# its DIAG line is the diagnosis — screenshot it and report.\n"
+                    + "say() { printf '\\033[36m[doctor]\\033[0m %s\\n' \"$1\"; }\n"
+                    + "runi() { say \"RUN: $1\"; out=$(timeout 3 \"$@\" 2>&1); rc=$?; printf '%s\\n' \"$out\" | head -3 | sed 's/^/    /'; case \"$out\" in *\"Function not implemented\"*) say \"DIAG: EXEC-DEPTH-ENOSYS (rc=$rc) — deeper fork/exec syscall path broken\";; *) case \"$rc\" in 124) say \"DIAG: HANG (rc=124) — froze inside this syscall path\";; *) say \"rc=$rc\";; esac;; esac; }\n"
                     + "say \"kernel   : $(uname -a 2>&1)\"\n"
                     + "say \"machine  : $(uname -m 2>&1)\"\n"
                     + "say \"alpine   : $(cat /etc/alpine-release 2>&1)\"\n"
                     + "say \"musl     : $(ls /lib/ld-musl-*.so.1 2>/dev/null | head -1)\"\n"
                     + "say \"resolv.conf:\"\n"
                     + "sed 's/^/    /' /etc/resolv.conf 2>&1\n"
-                    + "runi \"stat /etc/os-release >/dev/null && echo FS-STAT-OK\"\n"
-                    + "runi \"dd if=/dev/urandom bs=8 count=1 2>/dev/null | wc -c\"\n"
-                    + "runi \"nslookup dl-cdn.alpinelinux.org >/dev/null && echo DNS-OK\"\n"
-                    + "runi \"apk --version\"\n"
-                    + "say \"hint: for syscall-level breadcrumbs enable ZMUX proot debug mode\"\n";
+                    + "runi stat /etc/os-release\n"
+                    + "runi dd if=/dev/urandom bs=8 count=1\n"
+                    + "runi nslookup dl-cdn.alpinelinux.org\n"
+                    + "runi sh -c true\n"
+                    + "runi timeout 2 true\n"
+                    + "runi apk --version\n"
+                    + "say \"hint: deep syscall breadcrumbs: ZMUX proot debug mode (touch ~/.zmux_proot_debug)\"\n";
             java.nio.file.Files.write(target.toPath(),
                     content.getBytes(java.nio.charset.StandardCharsets.UTF_8));
             target.setExecutable(true, false);

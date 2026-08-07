@@ -17,7 +17,7 @@ Provenance (all pinned, all verifiable):
   verified against the official ``sha512`` published in the
   ``alpinelinux/docker-alpine`` ``v3.22`` branch (docker-alpine ships the
   minirootfs plus ``ca-certificates``, so TLS works out of the box).
-- PRoot ``4dba3af`` (termux/proot) and talloc ``2.4.2`` are cross-compiled by
+- PRoot ``v5.1.107.89`` (termux/proot) and talloc ``2.4.2`` are cross-compiled by
   ``scripts/build_proot_android.py`` (NDK) and shipped as ``libproot.so`` /
   ``libtalloc.so`` / ``libproot-loader*.so`` in the APK.
 - Alpine 3.23+ is deliberately NOT used: apk-tools 3 calls ``execveat()``,
@@ -1160,11 +1160,12 @@ def _write_guest_doctor(root: Path | None = None) -> None:
 
     Symptom class this answers: "every command hangs silently after the
     Alpine install, ping works, even `apk add <pkg>` just moves the cursor
-    to the next line". Each probe runs under a 3s timeout, so the LAST
-    `[doctor] RUN:` line printed before a freeze names the syscall path
-    that hangs (stat, /dev/urandom, DNS, apk's musl loader, ICMP).
-    Timed-out probes print their rc instead of freezing the session.
-    Busybox applets only; no host dependencies.
+    to the next line". Each probe is a DIRECT executable run under a 3s
+    timeout (no `sh -c` wrapper — on broken kernels that wrapper itself
+    dies with ENOSYS and hides the evidence). The printed DIAG line maps
+    rc/output to the failure class: HANG (rc=124) vs EXEC-DEPTH-ENOSYS
+    (busybox's can't-execute text), the two dominant silent-failure
+    signatures under PRoot on 32-bit ARM.
     """
     root = root or rootfs_dir()
     bin_dir = root / "usr" / "local" / "bin"
@@ -1172,21 +1173,23 @@ def _write_guest_doctor(root: Path | None = None) -> None:
     script = (
         "#!/bin/sh\n"
         "# Managed by ZMUX — guest self-diagnostics for the 'commands hang\n"
-        "# silently' class. The LAST 'RUN:' line before a freeze is the\n"
-        "# broken syscall path — screenshot it and report.\n"
+        "# silently' class. The LAST [doctor] RUN: line before a freeze plus\n"
+        "# its DIAG line is the diagnosis — screenshot it and report.\n"
         "say() { printf '\\033[36m[doctor]\\033[0m %s\\n' \"$1\"; }\n"
-        "runi() { say \"RUN: $1\"; out=$(timeout 3 sh -c \"$1\" 2>&1); rc=$?; printf '%s\n' \"$out\" | head -3 | sed 's/^/    /'; say \"rc=$rc (124=TIMEOUT/HANG)\"; }\n"
+        "runi() { say \"RUN: $1\"; out=$(timeout 3 \"$@\" 2>&1); rc=$?; printf '%s\\n' \"$out\" | head -3 | sed 's/^/    /'; case \"$out\" in *\"Function not implemented\"*) say \"DIAG: EXEC-DEPTH-ENOSYS (rc=$rc) — deeper fork/exec syscall path broken\";; *) case \"$rc\" in 124) say \"DIAG: HANG (rc=124) — froze inside this syscall path\";; *) say \"rc=$rc\";; esac;; esac; }\n"
         "say \"kernel   : $(uname -a 2>&1)\"\n"
         "say \"machine  : $(uname -m 2>&1)\"\n"
         "say \"alpine   : $(cat /etc/alpine-release 2>&1)\"\n"
         "say \"musl     : $(ls /lib/ld-musl-*.so.1 2>/dev/null | head -1)\"\n"
         "say \"resolv.conf:\"\n"
         "sed 's/^/    /' /etc/resolv.conf 2>&1\n"
-        "runi \"stat /etc/os-release >/dev/null && echo FS-STAT-OK\"\n"
-        "runi \"dd if=/dev/urandom bs=8 count=1 2>/dev/null | wc -c\"\n"
-        "runi \"nslookup dl-cdn.alpinelinux.org >/dev/null && echo DNS-OK\"\n"
-        "runi \"apk --version\"\n"
-        "say \"hint: for syscall-level breadcrumbs enable ZMUX proot debug mode\"\n"
+        "runi stat /etc/os-release\n"
+        "runi dd if=/dev/urandom bs=8 count=1\n"
+        "runi nslookup dl-cdn.alpinelinux.org\n"
+        "runi sh -c true\n"
+        "runi timeout 2 true\n"
+        "runi apk --version\n"
+        "say \"hint: deep syscall breadcrumbs: ZMUX proot debug mode (touch ~/.zmux_proot_debug)\"\n"
     )
     try:
         target = bin_dir / "zmux-doctor"
