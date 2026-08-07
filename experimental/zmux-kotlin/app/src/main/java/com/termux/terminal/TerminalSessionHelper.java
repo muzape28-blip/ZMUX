@@ -48,7 +48,16 @@ public class TerminalSessionHelper {
             fw.write("echo ''\n");
             fw.write("echo '(Type " + esc + "[34mlinux-setup" + esc + "[0m to install Alpine Linux)'\n");
             fw.write("echo '" + esc + "[33m=================================================" + esc + "[0m'\n");
-            fw.write("export PS1='" + esc + "[1;38;5;202mZMUX" + esc + "[0m:" + esc + "[38;5;80m\\w" + esc + "[0m$ '\n");
+            // mksh prompt-width contract (see mksh(1), PS1): the line editor
+            // counts printable characters to know where the screen edge is,
+            // so raw colour escape codes make it believe the prompt is ~31
+            // columns wider than it looks and commands wrap a few letters
+            // early ("command kepotong pindah baris"). The ksh88 convention:
+            // start with <DELIM><CR> and bracket every non-printing sequence
+            // between two DELIMs; inside pairs, nothing is printed or
+            // counted. mksh has no \w — use $PWD, which mksh re-expands on
+            // every prompt. \001 is the conventional, already-unused DELIM.
+            fw.write("export PS1='\001\r\001" + esc + "[1;38;5;202m\001ZMUX\001" + esc + "[0m\001:\001" + esc + "[38;5;80m\001$PWD\001" + esc + "[0m\001$ '\n");
             fw.write("alias ls='ls --color=auto'\n");
             fw.write("alias clear='clear; printf \"\\033[3J\"'\n");
             // Android 10+ W^X: files/bin/* can never be execve()'d directly, so
@@ -111,13 +120,13 @@ public class TerminalSessionHelper {
             "PATH=/system/bin:/system/xbin:/vendor/bin",
             "ENV=" + filesDir + "/.zmuxrc"
         };
-        // 80x24 is the conventional default PTY size. The TerminalView
-        // replaces this with the real cols/rows during its first layout via
-        // updateSize() -> session.updateSize() (TIOCSWINSZ). It MUST NOT be
-        // 2000: that wide initial geometry made line editing wrap wrong on
-        // phone-width screens before the first resize propagated (see the
-        // "apk add python3 wraps the 3" regression).
-        return new TerminalSession("/system/bin/sh", filesDir, new String[0], env, 80, client);
+        // The 5th TerminalSession argument is transcriptRows — the scrollback
+        // buffer line count, NOT the PTY width. The PTY size always comes
+        // from TerminalView.updateSize() -> session.updateSize() (TIOCSWINSZ)
+        // after first layout, so this value never affects editing/wrapping.
+        // 2000 lines of scrollback matches Termux's own default: 80 lines
+        // was far too puny on a real phone screen.
+        return new TerminalSession("/system/bin/sh", filesDir, new String[0], env, 2000, client);
     }
 
     /** Quote a path for embedding inside a POSIX sh command line. */
@@ -272,9 +281,19 @@ public class TerminalSessionHelper {
         try {
             java.io.File profileD = new java.io.File(rootfs, "etc/profile.d");
             profileD.mkdirs();
-            String esc = "\033";
-            String ps1 = esc + "[1;38;5;202mZMUX" + esc + "[0m:"
-                    + esc + "[38;5;80m\\w" + esc + "[0m\\$ ";
+            // The \033 octal text survives single quotes; busybox ash
+            // (bb_process_escape_sequence in lineedit.c) and bash turn it into
+            // ESC when the prompt is drawn.
+            String esc = "\\033";
+            // Bracket every non-printing sequence in \[ \]. Busybox ash
+            // line editing (parse_and_put_prompt) and bash/readline honour only
+            // these markers; without them ash counts the 31 invisible bytes of
+            // the colour codes as prompt width, so on a ~38-column phone every
+            // long command wraps a few letters too early (the wrap bug).
+            String ps1 = "\\[" + esc + "[1;38;5;202m\\]ZMUX"
+                    + "\\[" + esc + "[0m\\]:"
+                    + "\\[" + esc + "[38;5;80m\\]\\w"
+                    + "\\[" + esc + "[0m\\]\\$ ";
             java.nio.file.Files.write(
                     new java.io.File(profileD, "zmux-prompt.sh").toPath(),
                     ("# Managed by ZMUX — branded prompt.\n"
@@ -396,8 +415,11 @@ public class TerminalSessionHelper {
 
         // Fallback prompt only. The real prompt is installed at
         // /etc/profile.d/zmux-prompt.sh by ensureGuestPrompt so it wins over
-        // Alpine's /etc/profile default.
-        String ps1 = "\033[1;38;5;202mZMUX\033[0m:\033[38;5;80m\\w\033[0m\\$ ";
+        // Alpine's /etc/profile default. Same \[ \] contract as that file:
+        // busybox ash/bash line editors must not count the 31 invisible
+        // bytes of the colour codes, or long commands wrap a few letters
+        // early on phone-width screens.
+        String ps1 = "\\[\033[1;38;5;202m\\]ZMUX\\[\033[0m\\]:\\[\033[38;5;80m\\]\\w\\[\033[0m\\]\\$ ";
 
         String[] env = new String[] {
             "HOME=/root",
@@ -423,7 +445,9 @@ public class TerminalSessionHelper {
             filesDir,
             args.toArray(new String[0]),
             env,
-            80,
+            // transcriptRows (scrollback lines), not PTY size — see
+            // createLocalSession. Real cols/rows arrive via TIOCSWINSZ.
+            2000,
             client
         );
     }

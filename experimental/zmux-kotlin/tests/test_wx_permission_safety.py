@@ -299,7 +299,12 @@ class KotlinShellContractTests(unittest.TestCase):
         prompt_block = self._method_block(self.helper_src, "ensureGuestPrompt")
         self.assertIn("etc/profile.d", prompt_block)
         self.assertIn("zmux-prompt.sh", prompt_block)
-        self.assertIn("202mZMUX", prompt_block)
+        # Line-wrap contract: every colour escape must sit inside \[ \] so
+        # busybox ash (parse_and_put_prompt) and bash/readline measure the
+        # prompt at its visible width instead of adding ~31 phantom columns.
+        self.assertIn("202m\\\\]ZMUX", prompt_block)
+        self.assertIn("[1;38;5;202m", prompt_block)
+        self.assertNotIn("202mZMUX", prompt_block)
         self.assertNotIn("ZMUX@", prompt_block)
         self.assertNotIn("localhost:~", prompt_block)
 
@@ -312,12 +317,18 @@ class KotlinShellContractTests(unittest.TestCase):
         self.assertNotIn("ZMUX@", self.helper_src)
         self.assertNotIn("apt-get", self.helper_src)
 
-    def test_pty_default_size_is_not_2000(self) -> None:
-        # The constructor's 5th argument is the initial column count. It was
-        # once 2000, which made `apk add python3` wrap the "3" onto a new
-        # line before the PTY was ever resized to the real phone width.
-        self.assertNotIn(", 2000,", self.helper_src)
-        self.assertIn(", 80,", self.helper_src)
+    def test_session_scrollback_is_2000_lines_not_a_pty_size(self) -> None:
+        # TerminalSession's 5th constructor argument is transcriptRows — the
+        # scrollback buffer line count, NOT the PTY width. The PTY cols/rows
+        # only ever arrive through TerminalView.updateSize() ->
+        # session.updateSize() (TIOCSWINSZ) once the view has been measured.
+        # The historical "apk add wraps mid-word" bug came from an
+        # unbracketed colour PS1 (the line editor counted 31 invisible bytes
+        # as prompt width), NOT from this value, so 2000 lines of scrollback
+        # is correct and 80 (a Termux-default scrollback regression) must not
+        # come back.
+        self.assertIn(", 2000,", self.helper_src)
+        self.assertNotIn(", 80,", self.helper_src)
 
     def test_virtual_key_does_not_fire_on_touch_down(self) -> None:
         # Regression: keys used to call onFire() in ACTION_DOWN, so a finger

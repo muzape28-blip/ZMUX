@@ -143,10 +143,11 @@ class ZmuxTerminalActivity : AppCompatActivity(), TerminalSessionClient {
             // session.updateSize() which issues TIOCSWINSZ on the PTY.
             //
             // This is the bug that made `apk add python3` look "broken":
-            // the session was created with cols=2000, attachSession() ran
-            // before the view had a non-zero size, so the PTY never learned
-            // the actual ~38-40 column phone width and line editing wrapped
-            // at the wrong place.
+            // attachSession() ran before the view had a non-zero size, so the
+            // PTY never learned the actual ~38-40 column phone width and line
+            // editing wrapped at the wrong place. (The old 2000 constructor
+            // argument was transcript scrollback lines, never a width — the
+            // prompt colouring, not the buffer size, caused early wrapping.)
             terminalView.updateSize()
         }
 

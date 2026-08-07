@@ -702,17 +702,20 @@ def _write_guest_prompt(root: Path | None = None) -> None:
     Alpine's busybox ash sources /etc/profile, which sets a hostname-based
     prompt (``localhost:~#``) and then sources every /etc/profile.d/*.sh.
     Dropping our own script there overrides it reliably regardless of HOME.
-    Raw ANSI escapes are used (no bash-only ``\\[ \\]``) so they work under
-    busybox ash. The prompt is ``ZMUX:<path>$`` with the brand in ember and
-    the path in teal.
+    Every sequence that does not print is wrapped in \\[ \\] —
+    the only markers busybox ash (libbb/lineedit.c parse_and_put_prompt)
+    and bash/readline honour. Without them ash counts the 31 invisible
+    CSI bytes as prompt width and long commands wrap a few letters early
+    on phone-width screens (the wrong-wrap bug). The prompt is
+    ``ZMUX:<path>$`` with the brand in ember and the path in teal.
     """
     root = root or rootfs_dir()
     profile_d = root / "etc" / "profile.d"
     profile_d.mkdir(parents=True, exist_ok=True)
     esc = "\033"
     ps1 = (
-        f"{esc}[1;38;5;202mZMUX{esc}[0m:"
-        f"{esc}[38;5;80m\\w{esc}[0m\\$ "
+        f"\\[{esc}[1;38;5;202m\\]ZMUX\\[{esc}[0m\\]:"
+        f"\\[{esc}[38;5;80m\\]\\w\\[{esc}[0m\\]\\$ "
     )
     try:
         (profile_d / "zmux-prompt.sh").write_text(
@@ -851,8 +854,8 @@ def interactive_env() -> dict:
     env["LOGNAME"] = "zmux"
     esc = "\033"
     env["PS1"] = (
-        f"{esc}[1;38;5;202mZMUX{esc}[0m:"
-        f"{esc}[38;5;80m\\w{esc}[0m\\$ "
+        f"\\[{esc}[1;38;5;202m\\]ZMUX\\[{esc}[0m\\]:"
+        f"\\[{esc}[38;5;80m\\]\\w\\[{esc}[0m\\]\\$ "
     )
     return env
 
