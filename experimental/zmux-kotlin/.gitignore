@@ -7,3 +7,4 @@ captures/
 __pycache__/
 *.py[cod]
 error.log
+app/src/main/python/bin/

@@ -394,11 +394,19 @@ class KotlinAppDirContractTests(unittest.TestCase):
         export = 'Os.setenv("ANDROID_PRIVATE", filesDir.absolutePath, true)'
         self.assertIn(export, self.src, "the APP_DIR alignment contract is gone")
         setenv = self.src.index(export)
-        self.assertLess(setenv, self.src.index("Python.start(AndroidPlatform(this))"))
+        # Python.start is launched off the UI thread (inside preparePythonRuntime)
+        # so its `this` must be qualified as the activity.
+        start = self.src.index("Python.start(AndroidPlatform(this@ZmuxTerminalActivity))")
+        self.assertLess(setenv, start)
         self.assertLess(setenv, self.src.index('getModule("zmux'))
         on_create = self._kotlin_block(self.src, "override fun onCreate(")
         self.assertIn('Os.setenv("ANDROID_PRIVATE"', on_create)
-        self.assertIn("Python.start(AndroidPlatform(this))", on_create)
+        # The setenv must execute before the worker that starts Python is launched.
+        self.assertIn("preparePythonRuntime()", on_create)
+        self.assertLess(
+            on_create.index('Os.setenv("ANDROID_PRIVATE"'),
+            on_create.index("preparePythonRuntime()"),
+        )
 
     def test_legacy_install_is_migrated_by_python_not_guessed_in_kotlin(self) -> None:
         self.assertIn('callAttr("migrate_legacy_install")', self.src)

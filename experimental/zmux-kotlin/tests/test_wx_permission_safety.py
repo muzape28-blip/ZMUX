@@ -52,6 +52,10 @@ KOTLIN_ACTIVITY = (
     PROJECT_ROOT / "app" / "src" / "main" / "java" / "com" / "zmux" / "terminal"
     / "ZmuxTerminalActivity.kt"
 )
+KEY_CAP_VIEW = (
+    PROJECT_ROOT / "app" / "src" / "main" / "java" / "com" / "zmux" / "terminal"
+    / "widget" / "KeyCapView.kt"
+)
 
 _WRAPPER_PROBE = r"""
 import json, os, stat, sys
@@ -236,6 +240,7 @@ class KotlinShellContractTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.helper_src = JAVA_HELPER.read_text(encoding="utf-8")
         cls.activity_src = KOTLIN_ACTIVITY.read_text(encoding="utf-8")
+        cls.keycap_src = KEY_CAP_VIEW.read_text(encoding="utf-8")
         cls.local_block = cls._method_block(cls.helper_src, "createLocalSession")
         cls.linux_block = cls._method_block(cls.helper_src, "createLinuxSession")
 
@@ -273,9 +278,140 @@ class KotlinShellContractTests(unittest.TestCase):
 
     def test_guest_launcher_mirrors_python_guards(self) -> None:
         self.assertIn("ensureTallocCompat", self.linux_block)
-        self.assertIn("/etc/resolv.conf", self.linux_block)
+        # DNS must be written into the guest rootfs; the host
+        # /etc/resolv.conf must NEVER be bind-mounted anymore (it is often a
+        # 127.0.0.1 stub the PRoot guest cannot reach — the root cause of
+        # "Temporary failure resolving" and the apk add hang).
+        self.assertIn("ensureGuestResolvConf(rootfs)", self.linux_block)
+        self.assertNotIn('"/etc/resolv.conf:/etc/resolv.conf"', self.linux_block)
         self.assertIn("canRead()", self.linux_block)
         self.assertIn("canExecute()", self.linux_block)
+        # And the helper itself must carry public DNS fallbacks.
+        resolv_block = self._method_block(self.helper_src, "ensureGuestResolvConf")
+        self.assertIn("8.8.8.8", resolv_block)
+        self.assertIn("1.1.1.1", resolv_block)
+
+    def test_guest_prompt_is_branded_in_profile_d(self) -> None:
+        # The "localhost:~#" prompt came from Alpine's /etc/profile default
+        # overwriting our env PS1. We now drop a script in /etc/profile.d
+        # which busybox ash sources *after* that default.
+        self.assertIn("ensureGuestPrompt(rootfs)", self.linux_block)
+        prompt_block = self._method_block(self.helper_src, "ensureGuestPrompt")
+        self.assertIn("etc/profile.d", prompt_block)
+        self.assertIn("zmux-prompt.sh", prompt_block)
+        # Line-wrap contract: every colour escape must sit inside \[ \] so
+        # busybox ash (parse_and_put_prompt) and bash/readline measure the
+        # prompt at its visible width instead of adding ~31 phantom columns.
+        self.assertIn("202m\\\\]ZMUX", prompt_block)
+        self.assertIn("[1;38;5;202m", prompt_block)
+        self.assertNotIn("202mZMUX", prompt_block)
+        self.assertNotIn("ZMUX@", prompt_block)
+        self.assertNotIn("localhost:~", prompt_block)
+
+    def test_setup_confirms_before_install_and_prompt_is_simple(self) -> None:
+        self.assertIn("Install Alpine now? [y/N]", self.local_block)
+        # Only one guest OS remains: no multi-option menu, no second OSC
+        # install title, no second package manager, and no @os prompt.
+        self.assertNotIn("Choose [", self.helper_src)
+        self.assertNotIn("INSTALL_", self.helper_src.replace("INSTALL_ALPINE", ""))
+        self.assertNotIn("ZMUX@", self.helper_src)
+        self.assertNotIn("apt-get", self.helper_src)
+
+    def test_session_scrollback_is_2000_lines_not_a_pty_size(self) -> None:
+        # TerminalSession's 5th constructor argument is transcriptRows — the
+        # scrollback buffer line count, NOT the PTY width. The PTY cols/rows
+        # only ever arrive through TerminalView.updateSize() ->
+        # session.updateSize() (TIOCSWINSZ) once the view has been measured.
+        # The historical "apk add wraps mid-word" bug came from an
+        # unbracketed colour PS1 (the line editor counted 31 invisible bytes
+        # as prompt width), NOT from this value, so 2000 lines of scrollback
+        # is correct and 80 (a Termux-default scrollback regression) must not
+        # come back.
+        self.assertIn(", 2000,", self.helper_src)
+        self.assertNotIn(", 80,", self.helper_src)
+
+    def test_auto_reopen_refuses_wrong_arch_guest(self) -> None:
+        # Auto-reopen must not bypass linux-setup's arch guard: an armv7
+        # guest on an aarch64 device hangs every real binary (apk, git) on
+        # untranslated compat syscalls while busybox ping keeps working —
+        # the "two months of silent hangs" report. detectInstalledLinux()
+        # must compare /etc/apk/arch with linuxenv.alpine_arch() and refuse
+        # before launching PRoot.
+        detect_block = self._method_block(self.activity_src, "private fun detectInstalledLinux")
+        self.assertIn("etc/apk/arch", detect_block)
+        self.assertIn("alpine_arch", detect_block)
+        self.assertIn("legacyInstallNote", detect_block)
+        self.assertIn("Wrong-arch", detect_block)
+
+    def test_virtual_key_does_not_fire_on_touch_down(self) -> None:
+        # Regression: keys used to call onFire() in ACTION_DOWN, so a finger
+        # starting a horizontal scroll on the key bar immediately sent an
+        # arrow/character before the scroll started. A proper tap must fire
+        # only on ACTION_UP after the move stayed within touch slop.
+        self.assertIn("scaledTouchSlop", self.keycap_src)
+        self.assertIn("MotionEvent.ACTION_MOVE", self.keycap_src)
+        self.assertIn("dragCanceled", self.keycap_src)
+        self.assertIn("requestDisallowInterceptTouchEvent", self.keycap_src)
+        down_block = re.search(
+            r"MotionEvent\.ACTION_DOWN -> \{.*?\n\s*\}",
+            self.keycap_src,
+            re.S,
+        )
+        self.assertIsNotNone(down_block, "ACTION_DOWN block not found")
+        self.assertNotIn("onFire?.invoke()", down_block.group(0))
+        self.assertNotIn("onFire!!.invoke()", down_block.group(0))
+        up_block = re.search(
+            r"MotionEvent\.ACTION_UP -> \{.*?\n\s*\}",
+            self.keycap_src,
+            re.S,
+        )
+        self.assertIsNotNone(up_block, "ACTION_UP block not found")
+        self.assertIn("onFire?.invoke()", up_block.group(0))
+
+    def test_layout_changes_propagate_pty_size(self) -> None:
+        # The onLayoutChangeListener must call TerminalView.updateSize() so
+        # session.updateSize()/TIOCSWINSZ fires every time the view geometry
+        # changes (first layout, rotation, IME resize). The dead onResize
+        # callback must be gone — it was never assigned to anything.
+        on_create = re.search(
+            r"override fun onCreate\(.*?^    \}", self.activity_src, re.S | re.M
+        )
+        self.assertIsNotNone(on_create)
+        block = on_create.group(0)
+        self.assertIn("terminalView.updateSize()", block)
+        self.assertNotIn("onResize", block)
+        self.assertNotIn("onResize", Path(
+            PROJECT_ROOT / "app/src/main/java/com/termux/terminal"
+            / "ZmuxTerminalSession.kt"
+        ).read_text(encoding="utf-8"))
+
+    def test_theme_is_applied_immediately_on_attach(self) -> None:
+        # The palette must be applied right after attachSession and MUST
+        # notify the session via onColorsChanged() + invalidate(), otherwise
+        # the renderer keeps Termux's default palette until the next output
+        # (the "I changed colours but nothing happened" bug).
+        self.assertIn("private fun applyThemeToView(", self.activity_src)
+        self.assertIn("ZmuxTheme.applyToView(", self.activity_src)
+        self.assertIn("applyThemeToView(s.session)", self.activity_src)
+        self.assertIn("onColorsChanged", (
+            PROJECT_ROOT / "app/src/main/java/com/zmux/terminal/ZmuxTheme.kt"
+        ).read_text(encoding="utf-8"))
+        self.assertIn("Typeface.MONOSPACE", (
+            PROJECT_ROOT / "app/src/main/java/com/zmux/terminal/ZmuxTheme.kt"
+        ).read_text(encoding="utf-8"))
+
+    def test_terminal_session_client_interface_is_fully_implemented(self) -> None:
+        # Termux TerminalSessionClient is an interface; missing any abstract
+        # method fails the Kotlin compile (the Build Debug APK step). List
+        # matches the 0.118.0 interface exactly — newer Termux releases add
+        # e.g. setTerminalShellPid, which is why we don't claim it here.
+        for method in (
+            "onTextChanged", "onTitleChanged", "onSessionFinished",
+            "onCopyTextToClipboard", "onPasteTextFromClipboard",
+            "onBell", "onColorsChanged", "onTerminalCursorStateChange",
+            "getTerminalCursorStyle",
+        ):
+            self.assertIn(method, self.activity_src, f"missing override: {method}")
 
     def test_installed_rootfs_auto_reopened_on_activity_recreate(self) -> None:
         self.assertIn("detectInstalledLinux()", self.activity_src)

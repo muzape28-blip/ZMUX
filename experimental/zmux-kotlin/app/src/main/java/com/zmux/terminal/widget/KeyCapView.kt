@@ -5,10 +5,10 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.RectF
-import android.os.SystemClock
 import android.util.AttributeSet
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import com.zmux.terminal.ZmuxKeys
 import com.zmux.terminal.ZmuxTheme
 
@@ -72,18 +72,32 @@ class KeyCapView @JvmOverloads constructor(
     }
     private val bounds = RectF()
 
+    private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
+
     private var pressed = false
     private var repeating = false
-    private var repeatStart = 0L
+    private var downX = 0f
+    private var downY = 0f
+    private var dragCanceled = false
+    private var firedByHold = false
 
     private val repeater = object : Runnable {
         override fun run() {
-            if (!pressed) return
+            if (!pressed || dragCanceled) return
             repeating = true
+            firedByHold = true
             onFire?.invoke()
             invalidate()
             postDelayed(this, ZmuxKeys.REPEAT_INTERVAL_MS)
         }
+    }
+
+    private fun resetTouchState() {
+        pressed = false
+        repeating = false
+        dragCanceled = false
+        firedByHold = false
+        removeCallbacks(repeater)
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
@@ -101,18 +115,54 @@ class KeyCapView @JvmOverloads constructor(
             MotionEvent.ACTION_DOWN -> {
                 pressed = true
                 repeating = false
-                repeatStart = SystemClock.uptimeMillis()
-                onFire?.invoke()
-                if (repeatable) postDelayed(repeater, ZmuxKeys.REPEAT_INITIAL_DELAY_MS)
+                dragCanceled = false
+                firedByHold = false
+                downX = event.x
+                downY = event.y
+                parent?.requestDisallowInterceptTouchEvent(true)
+                if (repeatable) {
+                    postDelayed(repeater, ZmuxKeys.REPEAT_INITIAL_DELAY_MS)
+                }
                 invalidate()
                 return true
             }
 
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                pressed = false
-                repeating = false
+            MotionEvent.ACTION_MOVE -> {
+                if (pressed && !dragCanceled) {
+                    val dx = event.x - downX
+                    val dy = event.y - downY
+                    if (dx * dx + dy * dy > touchSlop * touchSlop) {
+                        // The finger moved enough to be a scroll/drag, not a
+                        // tap. Give the HorizontalScrollView its gesture back
+                        // and do NOT send a key. This prevents left/right
+                        // arrows (or any key) from firing while the user is
+                        // just trying to scroll the key bar.
+                        dragCanceled = true
+                        pressed = false
+                        repeating = false
+                        removeCallbacks(repeater)
+                        parent?.requestDisallowInterceptTouchEvent(false)
+                        invalidate()
+                    }
+                }
+                return true
+            }
+
+            MotionEvent.ACTION_UP -> {
                 removeCallbacks(repeater)
-                if (event.actionMasked == MotionEvent.ACTION_UP) performClick()
+                val shouldTap = pressed && !dragCanceled && !firedByHold
+                resetTouchState()
+                if (shouldTap) {
+                    onFire?.invoke()
+                    performClick()
+                }
+                invalidate()
+                return true
+            }
+
+            MotionEvent.ACTION_CANCEL -> {
+                resetTouchState()
+                parent?.requestDisallowInterceptTouchEvent(false)
                 invalidate()
                 return true
             }

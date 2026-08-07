@@ -2,8 +2,8 @@
 """Regression tests for the rootfs installer code usable without Android/PRoot.
 
 These tests deliberately exercise the conditions which were hidden by the old
-Chaquopy ``NoneType: None`` message: a Java-style progress object, the valid
-Debian asset pin, and proot-distro's top-level archive directory.
+Chaquopy ``NoneType: None`` message: a Java-style progress object, Alpine
+asset pins, and archive extraction safety.
 """
 from __future__ import annotations
 
@@ -88,15 +88,80 @@ class LinuxEnvInstallTests(unittest.TestCase):
         self.assertEqual(linuxenv.native_library_dir(), str(native_dir))
         self.assertEqual(linuxenv.proot_binary(), str(proot))
 
-    def test_debian_spec_uses_existing_verified_termux_asset_and_native_arch(self) -> None:
-        spec = linuxenv._rootfs_spec("debian")
-        self.assertEqual(spec["checksum_name"], "sha256")
+    def test_rootfs_spec_is_alpine_only(self) -> None:
+        spec = linuxenv._rootfs_spec()
+        self.assertEqual(spec["os_name"], "alpine")
+        self.assertEqual(spec["checksum_name"], "sha512")
         self.assertTrue(str(spec["checksum"]))
-        self.assertIn("debian-bookworm-", str(spec["url"]))
-        self.assertIn("v4.7.0", str(spec["url"]))
-        self.assertNotIn("v4.0.0", str(spec["url"]))
-        if linuxenv.alpine_arch() == "x86_64":
-            self.assertIn("debian-bookworm-x86_64", str(spec["url"]))
+        self.assertIn("alpine-minirootfs", str(spec["url"]))
+        self.assertNotIn("debian", str(spec["url"]).lower())
+        with self.assertRaisesRegex(ValueError, "only 'alpine'"):
+            linuxenv._rootfs_spec("ubuntu")
+
+    def test_bootstrap_writes_alpine_prompt_dns_and_marker(self) -> None:
+        root = self.root / "bootstrap-root"
+        root.mkdir()
+        (root / "bin").mkdir(parents=True)
+        (root / "bin/sh").write_text("#!/bin/sh\n")
+        linuxenv._bootstrap(root)
+        self.assertEqual((root / "etc/.zmux-rootfs").read_text().strip(), "alpine")
+        self.assertIn("nameserver 8.8.8.8", (root / "etc/resolv.conf").read_text())
+        self.assertIn("PS1='", (root / "etc/profile.d/zmux-prompt.sh").read_text())
+        self.assertIn("ZMUX", (root / "etc/profile.d/zmux-prompt.sh").read_text())
+        self.assertIn("ZMUX", (root / "etc/profile.d/zmux-motd.sh").read_text())
+        repos = (root / "etc/apk/repositories").read_text()
+        self.assertIn(linuxenv.ALPINE_BRANCH, repos)
+
+    def test_zmux_device_abi_picks_aarch64_on_armv8l_kernel(self) -> None:
+        # The override is read at module import, so patch the module-level
+        # constant directly. On device, Kotlin sets ZMUX_DEVICE_ABI before
+        # Python starts, so there is no race there.
+        old = linuxenv._DEVICE_ABI_OVERRIDE
+        try:
+            linuxenv._DEVICE_ABI_OVERRIDE = "arm64-v8a"
+            self.assertEqual(linuxenv.alpine_arch(), "aarch64")
+        finally:
+            linuxenv._DEVICE_ABI_OVERRIDE = old
+
+    def test_install_replaces_rootfs_when_arch_mismatches(self) -> None:
+        import os as _os
+        from unittest.mock import patch as _patch
+        old_env = _os.environ.get("ZMUX_DEVICE_ABI")
+        old_android = _os.environ.get("ANDROID_PRIVATE")
+        old_rootfs = linuxenv._ROOTFS_DIR
+        try:
+            _os.environ["ZMUX_DEVICE_ABI"] = "arm64-v8a"
+            _os.environ["ANDROID_PRIVATE"] = "/tmp"
+            fake_root = self.root / "wrong-arch-rootfs"
+            fake_root.mkdir(parents=True)
+            (fake_root / "bin").mkdir(parents=True)
+            (fake_root / "bin/sh").write_text("#!/bin/sh\n")
+            etc = fake_root / "etc"
+            etc.mkdir()
+            (etc / ".zmux-rootfs").write_text("alpine\n")
+            (etc / "alpine-release").write_text("3.22.0\n")
+            apk = etc / "apk"
+            apk.mkdir()
+            (apk / "arch").write_text("armv7\n")
+            linuxenv._ROOTFS_DIR = fake_root
+
+            with self.assertRaisesRegex(RuntimeError, "download attempted"):
+                with _patch(
+                    "urllib.request.urlopen",
+                    side_effect=RuntimeError("download attempted"),
+                ):
+                    linuxenv.install()
+            self.assertFalse(fake_root.exists())
+        finally:
+            if old_env is None:
+                _os.environ.pop("ZMUX_DEVICE_ABI", None)
+            else:
+                _os.environ["ZMUX_DEVICE_ABI"] = old_env
+            if old_android is None:
+                _os.environ.pop("ANDROID_PRIVATE", None)
+            else:
+                _os.environ["ANDROID_PRIVATE"] = old_android
+            linuxenv._ROOTFS_DIR = old_rootfs
 
     def test_install_accepts_java_style_progress_callback_end_to_end(self) -> None:
         archive = self._tar(
@@ -114,7 +179,6 @@ class LinuxEnvInstallTests(unittest.TestCase):
             "checksum_name": "sha512",
             "checksum": hashlib.sha512(payload).hexdigest(),
             "extension": "tar.gz",
-            "strip_components": 0,
         }
 
         class Response(io.BytesIO):
@@ -137,27 +201,6 @@ class LinuxEnvInstallTests(unittest.TestCase):
         self.assertEqual(linuxenv.installed_os(), "alpine")
         self.assertTrue(any("Downloading Alpine test" in message for message in callback.messages))
         self.assertTrue(any("checksum verified" in message for message in callback.messages))
-
-    def test_debian_archive_top_directory_is_stripped_and_detected(self) -> None:
-        archive = self._tar(
-            "debian-rootfs.tar.gz",
-            {
-                "debian-bookworm-aarch64/bin/sh": b"#!/bin/sh\n",
-                "debian-bookworm-aarch64/etc/debian_version": b"12.9\n",
-            },
-        )
-        staging = self.root / "staging"
-        staging.mkdir()
-        linuxenv._safe_extract(archive, staging, strip_components=1)
-        self.assertTrue((staging / "bin" / "sh").is_file())
-        self.assertTrue((staging / "etc" / "debian_version").is_file())
-        self.assertFalse((staging / "debian-bookworm-aarch64").exists())
-
-        linuxenv._bootstrap(staging, "debian")
-        staging.replace(linuxenv.rootfs_dir())
-        self.assertEqual(linuxenv.installed_os(), "debian")
-        self.assertEqual(linuxenv.installed_version(), "12.9")
-        self.assertTrue(linuxenv.is_installed())
 
     def test_alpine_absolute_guest_sh_link_is_valid(self) -> None:
         """Alpine uses /bin/sh -> /bin/busybox, not a host-side link."""
