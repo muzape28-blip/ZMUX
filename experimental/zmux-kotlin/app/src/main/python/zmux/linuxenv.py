@@ -557,41 +557,129 @@ def _ensure_talloc_compat(lib_dir: str) -> str | None:
     return None
 
 
+SECCOMP_MODE_MARKER = ".zmux_proot_seccomp_mode"
+
+
+def _proot_linker_env() -> dict:
+    """Linker environment for the proot binary *itself* (not the guest).
+
+    Extracted from :func:`proot_env` so the seccomp probe can boot the same
+    binary with the same loader context without recursing into the verdict
+    logic. Must mirror TerminalSessionHelper's probe env.
+    """
+    out: dict = {}
+    if _is_android():
+        lib_dir = native_library_dir() or ""
+        if lib_dir:
+            out["LD_LIBRARY_PATH"] = lib_dir
+            out["PROOT_LOADER"] = os.path.join(lib_dir, "libproot-loader.so")
+            out["PROOT_TMP_DIR"] = str(CACHE_DIR)
+            # Self-heal SONAME (see _ensure_talloc_compat): the compat
+            # directory must win over the raw library dir.
+            compat_dir = _ensure_talloc_compat(lib_dir)
+            if compat_dir:
+                out["LD_LIBRARY_PATH"] = os.pathsep.join(
+                    [compat_dir, out["LD_LIBRARY_PATH"]]
+                )
+    else:
+        binary = proot_binary()
+        if binary:
+            out["LD_LIBRARY_PATH"] = os.path.dirname(os.path.realpath(binary))
+    return out
+
+
+def _probe_proot_seccomp(proot: str) -> bool:
+    """Run one trivial fully-traced child WITHOUT PROOT_NO_SECCOMP.
+
+    Returns True when the guest must run with the accelerator disabled.
+    proot's seccomp accelerator traps only syscalls it must translate and
+    lets the rest run at native speed; disabling it route every syscall
+    through ptrace and costs ~10-20x on syscall storms (e.g. ``apk add``:
+    20s here vs <1s accelerated on the same device). On a kernel whose
+    seccomp policy rejects proot's filter the traced child dies with
+    SIGSYS (signal 31); any non-zero exit, timeout or probe error falls
+    back to the safe slow mode so the guest can never be bricked by this
+    optimisation.
+    """
+    true_path = "/system/bin/true" if os.path.isfile("/system/bin/true") else "/bin/true"
+    env = dict(os.environ)
+    env.pop("PROOT_NO_SECCOMP", None)
+    env.update(_proot_linker_env())
+    try:
+        result = subprocess.run(
+            [proot, "-0", "--kill-on-exit", "-w", "/", true_path],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+        return result.returncode != 0
+    except (OSError, subprocess.TimeoutExpired):
+        return True
+
+
+def _proot_needs_no_seccomp(proot: str | None = None, files_dir: Path | None = None) -> bool:
+    """Decide PROOT_NO_SECCOMP from a cached one-shot capability probe.
+
+    The verdict lives in ``<filesDir>/.zmux_proot_seccomp_mode`` (shared
+    with the Kotlin launcher, which uses the same file and format) keyed
+    by the proot binary's path/mtime/size, so the probe runs once per
+    proot build instead of once per session:
+
+        line 1: "accelerated" | "no_seccomp"
+        line 2: "<proot path>:<mtime sec>:<size>"
+
+    Safe default is True (slow but universal): a missing proot, an
+    unreadable marker or a failed probe all keep the historical
+    PROOT_NO_SECCOMP=1 behaviour. Must mirror
+    TerminalSessionHelper.prootNeedsNoSeccomp.
+    """
+    proot = proot or proot_binary()
+    if not proot:
+        return True
+    if files_dir is None:
+        files_dir = Path(os.environ.get("ANDROID_PRIVATE") or str(APP_DIR))
+    try:
+        st = os.stat(proot)
+        stamp = f"{proot}:{int(st.st_mtime)}:{st.st_size}"
+    except OSError:
+        return True
+    marker = files_dir / SECCOMP_MODE_MARKER
+    try:
+        lines = marker.read_text(encoding="utf-8").splitlines()
+        if len(lines) >= 2 and lines[1].strip() == stamp:
+            return lines[0].strip() == "no_seccomp"
+    except OSError:
+        pass
+    needs = _probe_proot_seccomp(proot)
+    try:
+        marker.write_text(
+            ("no_seccomp" if needs else "accelerated") + "\n" + stamp + "\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+    return needs
+
+
 def proot_env() -> dict:
     """Extra environment variables every proot child needs."""
     extra: dict = {
         "PATH": GUEST_PATH,
         "HOME": GUEST_HOME,
-        # Some Android kernels (esp. Android 14/15) deliver a fatal SIGSYS
-        # ("Bad system call") to proot's tracees when proot uses its seccomp
-        # accelerator. Disabling it keeps guests working; proot falls back to
-        # pure ptrace.
-        "PROOT_NO_SECCOMP": "1",
     }
-    if _is_android():
-        lib_dir = native_library_dir() or ""
-        if lib_dir:
-            extra["LD_LIBRARY_PATH"] = lib_dir
-            extra["PROOT_LOADER"] = os.path.join(lib_dir, "libproot-loader.so")
-            extra["PROOT_TMP_DIR"] = str(CACHE_DIR)
-            # Self-heal: old APKs package libtalloc.so under a name the
-            # linker will not look for (see _ensure_talloc_compat). Prepend
-            # the compat directory so the mirrored SONAME file wins.
-            compat_dir = _ensure_talloc_compat(lib_dir)
-            if compat_dir:
-                extra["LD_LIBRARY_PATH"] = os.pathsep.join(
-                    [compat_dir, extra["LD_LIBRARY_PATH"]]
-                )
-        # With no lib_dir at all there is nothing to mirror from and proot
-        # cannot be located either; leave LD_LIBRARY_PATH unset and let the
-        # proot_binary() lookup in build_command_line report the real error.
-    else:
-        # Host build of proot links a dynamic libtalloc; the builder writes
-        # it next to the binary, so make the loader find it.
-        binary = proot_binary()
-        if binary:
-            neighbor = os.path.dirname(os.path.realpath(binary))
-            extra["LD_LIBRARY_PATH"] = neighbor
+    # PROOT_NO_SECCOMP is adaptive now, not unconditional: _proot_needs_no_seccomp
+    # probe-caches whether this kernel accepts proot's seccomp accelerator
+    # (SIGSYS-safe fallback keeps the historical slow mode when it does not,
+    # when proot is absent, or when anything in the probe errors out).
+    if _proot_needs_no_seccomp():
+        extra["PROOT_NO_SECCOMP"] = "1"
+    # With no lib_dir at all there is nothing to mirror from and proot
+    # cannot be located either; the links helper leaves LD_LIBRARY_PATH
+    # unset and the proot_binary() lookup in build_command_line reports
+    # the real error.
+    extra.update(_proot_linker_env())
     return extra
 
 

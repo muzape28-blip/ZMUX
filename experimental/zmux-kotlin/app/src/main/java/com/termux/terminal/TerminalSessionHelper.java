@@ -474,7 +474,7 @@ public class TerminalSessionHelper {
         // early on phone-width screens.
         String ps1 = "\\[\033[1;38;5;202m\\]ZMUX\\[\033[0m\\]:\\[\033[38;5;80m\\]\\w\\[\033[0m\\]\\$ ";
 
-        String[] env = new String[] {
+        java.util.List<String> envList = new java.util.ArrayList<>(java.util.Arrays.asList(
             "HOME=/root",
             "USER=zmux",
             "LOGNAME=zmux",
@@ -485,11 +485,20 @@ public class TerminalSessionHelper {
             "PS1=" + ps1,
             "LD_LIBRARY_PATH=" + ldLibraryPath,
             "PROOT_LOADER=" + loader,
-            "PROOT_TMP_DIR=" + cache.getAbsolutePath(),
-            // Avoid SIGSYS ("Bad system call") on kernels whose seccomp
-            // filter rejects proot's accelerator (Android 14/15).
-            "PROOT_NO_SECCOMP=1",
-        };
+            "PROOT_TMP_DIR=" + cache.getAbsolutePath()
+        ));
+        // PROOT_NO_SECCOMP is adaptive, not blanket: proot's seccomp
+        // accelerator traps only the syscalls it must translate and lets
+        // the rest run at native speed (~10-20x on syscall storms such as
+        // `apk add` — 20s here vs <1s on the very same device). Disabling
+        // it is only needed on kernels whose seccomp policy rejects
+        // proot's filter (the traced child dies with SIGSYS, signal 31).
+        // prootNeedsNoSeccomp() probe-caches that verdict once per proot
+        // build; any probe failure keeps the safe slow mode.
+        if (prootNeedsNoSeccomp(filesDir, prootPath, ldLibraryPath, loader, cache)) {
+            envList.add("PROOT_NO_SECCOMP=1");
+        }
+        String[] env = envList.toArray(new String[0]);
         // 80x24 default; real cols/rows are propagated from TerminalView
         // after layout via updateSize(). See createLocalSession() for why
         // this must not be 2000.
@@ -503,6 +512,83 @@ public class TerminalSessionHelper {
             2000,
             client
         );
+    }
+
+    /** Shared verdict file with linuxenv._proot_needs_no_seccomp. */
+    private static final String SECCOMP_MODE_MARKER = ".zmux_proot_seccomp_mode";
+
+    /**
+     * Decide whether this device must run proot with PROOT_NO_SECCOMP=1.
+     * The verdict is cached in <filesDir>/.zmux_proot_seccomp_mode (same
+     * file and format as the Python launcher) keyed by the proot binary's
+     * path/mtime/size, so the probe below runs once per proot build, not
+     * once per session:
+     *
+     *     line 1: "accelerated" | "no_seccomp"
+     *     line 2: "<proot path>:<mtime sec>:<size>"
+     *
+     * Safe default is true (slow but universal): a missing proot, an
+     * unreadable marker or a failed probe keeps the historical behaviour.
+     * Must mirror linuxenv._proot_needs_no_seccomp.
+     */
+    static boolean prootNeedsNoSeccomp(String filesDir, String prootPath,
+            String ldLibraryPath, String loader, java.io.File cacheDir) {
+        java.io.File proot = new java.io.File(prootPath);
+        if (!proot.isFile()) {
+            return true;
+        }
+        String stamp = proot.getAbsolutePath() + ":" + (proot.lastModified() / 1000L) + ":" + proot.length();
+        java.io.File marker = new java.io.File(filesDir, SECCOMP_MODE_MARKER);
+        try {
+            java.util.List<String> lines = java.nio.file.Files.readAllLines(
+                    marker.toPath(), java.nio.charset.StandardCharsets.UTF_8);
+            if (lines.size() >= 2 && lines.get(1).trim().equals(stamp)) {
+                return lines.get(0).trim().equals("no_seccomp");
+            }
+        } catch (Exception ignored) {
+            // fall through to the probe
+        }
+        boolean needs = probeProotSeccomp(prootPath, ldLibraryPath, loader, cacheDir);
+        try {
+            java.nio.file.Files.write(marker.toPath(),
+                    ((needs ? "no_seccomp" : "accelerated") + "\n" + stamp + "\n")
+                            .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        } catch (Exception ignored) {
+            // verdict still applies for this session even if the cache fails
+        }
+        return needs;
+    }
+
+    /**
+     * Run one trivial fully-traced child WITHOUT PROOT_NO_SECCOMP. Exit 0
+     * means the kernel accepted proot's seccomp filter (fast mode is safe
+     * here); a kill by SIGSYS (exit 159 = 128 + 31, "Bad system call"),
+     * any other non-zero exit, a timeout or a probe error all fall back
+     * to the safe slow mode so this optimisation can never brick guests.
+     */
+    private static boolean probeProotSeccomp(String prootPath, String ldLibraryPath,
+            String loader, java.io.File cacheDir) {
+        try {
+            String truePath = new java.io.File("/system/bin/true").isFile()
+                    ? "/system/bin/true" : "/bin/true";
+            ProcessBuilder pb = new ProcessBuilder(
+                    prootPath, "-0", "--kill-on-exit", "-w", "/", truePath);
+            java.util.Map<String, String> penv = pb.environment();
+            penv.remove("PROOT_NO_SECCOMP");
+            penv.put("LD_LIBRARY_PATH", ldLibraryPath);
+            penv.put("PROOT_LOADER", loader);
+            penv.put("PROOT_TMP_DIR", cacheDir.getAbsolutePath());
+            pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
+            pb.redirectError(ProcessBuilder.Redirect.DISCARD);
+            Process proc = pb.start();
+            if (!proc.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) {
+                proc.destroyForcibly();
+                return true;
+            }
+            return proc.exitValue() != 0;
+        } catch (Exception e) {
+            return true;
+        }
     }
 
     public static TerminalEmulator getEmulator(TerminalSession session) {
