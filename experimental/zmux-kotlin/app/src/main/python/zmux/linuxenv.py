@@ -750,6 +750,7 @@ def _write_guest_motd(root: Path | None = None) -> None:
             "BANNER\n"
             "  printf '\\033[0m\\033[38;5;80m  Alpine %s\\033[0m\\n' \"$(cat /etc/alpine-release 2>/dev/null)\"\n"
             "  printf '\\033[90m  type \\033[36mapk add <pkg>\\033[90m to install packages\\033[0m\\n'\n"
+            "  printf '\\033[90m  stuck command? run \\033[36mzmux-doctor\\033[90m\\033[0m\\n'\n"
             "  printf '\\n'\n"
             "fi\n",
             encoding="utf-8",
@@ -789,6 +790,7 @@ def build_proot_argv(guest_argv: list, host_cwd: Path,
     if is_installed():
         _write_guest_prompt()
         _write_guest_motd()
+        _write_guest_doctor()
     for bind in extra_binds or ():
         argv += ["-b", bind]
     argv += ["-w", guest_cwd(host_cwd), *guest_argv]
@@ -846,6 +848,7 @@ def interactive_env() -> dict:
     if is_installed():
         _write_guest_prompt()
         _write_guest_motd()
+        _write_guest_doctor()
     env = proot_env()
     env["TERM"] = "xterm-256color"
     env["LANG"] = "C.UTF-8"
@@ -1152,6 +1155,48 @@ def _safe_extract(tarball: Path, target: Path) -> None:
             archive.extractall(target, members=members)
 
 
+def _write_guest_doctor(root: Path | None = None) -> None:
+    """Install ``/usr/local/bin/zmux-doctor`` — guest self-diagnostics.
+
+    Symptom class this answers: "every command hangs silently after the
+    Alpine install, ping works, even `apk add <pkg>` just moves the cursor
+    to the next line". Each probe runs under a 3s timeout, so the LAST
+    `[doctor] RUN:` line printed before a freeze names the syscall path
+    that hangs (stat, /dev/urandom, DNS, apk's musl loader, ICMP).
+    Timed-out probes print their rc instead of freezing the session.
+    Busybox applets only; no host dependencies.
+    """
+    root = root or rootfs_dir()
+    bin_dir = root / "usr" / "local" / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    script = (
+        "#!/bin/sh\n"
+        "# Managed by ZMUX — guest self-diagnostics for the 'commands hang\n"
+        "# silently' class. The LAST 'RUN:' line before a freeze is the\n"
+        "# broken syscall path — screenshot it and report.\n"
+        "say() { printf '\\033[36m[doctor]\\033[0m %s\\n' \"$1\"; }\n"
+        "runi() { say \"RUN: $1\"; out=$(timeout 3 sh -c \"$1\" 2>&1); rc=$?; printf '%s\n' \"$out\" | head -3 | sed 's/^/    /'; say \"rc=$rc (124=TIMEOUT/HANG)\"; }\n"
+        "say \"kernel   : $(uname -a 2>&1)\"\n"
+        "say \"machine  : $(uname -m 2>&1)\"\n"
+        "say \"alpine   : $(cat /etc/alpine-release 2>&1)\"\n"
+        "say \"musl     : $(ls /lib/ld-musl-*.so.1 2>/dev/null | head -1)\"\n"
+        "say \"resolv.conf:\"\n"
+        "sed 's/^/    /' /etc/resolv.conf 2>&1\n"
+        "runi \"stat /etc/os-release >/dev/null && echo FS-STAT-OK\"\n"
+        "runi \"dd if=/dev/urandom bs=8 count=1 2>/dev/null | wc -c\"\n"
+        "runi \"nslookup dl-cdn.alpinelinux.org >/dev/null && echo DNS-OK\"\n"
+        "runi \"apk --version\"\n"
+        "say \"hint: for syscall-level breadcrumbs enable ZMUX proot debug mode\"\n"
+    )
+    try:
+        target = bin_dir / "zmux-doctor"
+        target.write_text(script, encoding="utf-8")
+        with contextlib.suppress(OSError):
+            target.chmod(0o755)
+    except OSError:
+        pass
+
+
 def _bootstrap(root: Path, os_name: str = "alpine") -> None:
     """Write first-run Alpine configuration and a durable OS marker."""
     _normalise_os_name(os_name)
@@ -1184,6 +1229,7 @@ def _bootstrap(root: Path, os_name: str = "alpine") -> None:
     _ensure_guest_resolv_conf(root)
     _write_guest_prompt(root)
     _write_guest_motd(root)
+    _write_guest_doctor(root)
     (etc / ROOTFS_OS_MARKER).write_text("alpine\n", encoding="utf-8")
 
 

@@ -325,11 +325,49 @@ public class TerminalSessionHelper {
                     + "BANNER\n"
                     + "  printf '\\033[0m\\033[38;5;80m  Alpine %s\\033[0m\\n' \"$(cat /etc/alpine-release 2>/dev/null)\"\n"
                     + "  printf '\\033[90m  type \\033[36mapk add <pkg>\\033[90m to install packages\\033[0m\\n'\n"
+                    + "  printf '\\033[90m  stuck command? run \\033[36mzmux-doctor\\033[90m\\033[0m\\n'\n"
                     + "  printf '\\n'\n"
                     + "fi\n";
             java.nio.file.Files.write(
                     new java.io.File(profileD, "zmux-motd.sh").toPath(),
                     content.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        } catch (Exception ignored) {
+        }
+    }
+
+    /**
+     * Install /usr/local/bin/zmux-doctor inside the guest. It answers the
+     * "commands hang silently after install" class: every probe runs under
+     * a 3s timeout, so the LAST [doctor] RUN: line printed before a freeze
+     * names the broken syscall path (stat, urandom, DNS, musl loader, apk).
+     * Must mirror linuxenv._write_guest_doctor.
+     */
+    private static void ensureGuestDoctor(java.io.File rootfs) {
+        try {
+            java.io.File binDir = new java.io.File(rootfs, "usr/local/bin");
+            binDir.mkdirs();
+            java.io.File target = new java.io.File(binDir, "zmux-doctor");
+            String content =
+                    "#!/bin/sh\n"
+                    + "# Managed by ZMUX — guest self-diagnostics for the 'commands hang\n"
+                    + "# silently' class. The LAST 'RUN:' line before a freeze is the\n"
+                    + "# broken syscall path — screenshot it and report.\n"
+                    + "say() { printf '\033[36m[doctor]\033[0m %s\\n' \"$1\"; }\n"
+                    + "runi() { say \"RUN: $1\"; out=$(timeout 3 sh -c \"$1\" 2>&1); rc=$?; printf '%s\\n' \"$out\" | head -3 | sed 's/^/    /'; say \"rc=$rc (124=TIMEOUT/HANG)\"; }\n"
+                    + "say \"kernel   : $(uname -a 2>&1)\"\n"
+                    + "say \"machine  : $(uname -m 2>&1)\"\n"
+                    + "say \"alpine   : $(cat /etc/alpine-release 2>&1)\"\n"
+                    + "say \"musl     : $(ls /lib/ld-musl-*.so.1 2>/dev/null | head -1)\"\n"
+                    + "say \"resolv.conf:\"\n"
+                    + "sed 's/^/    /' /etc/resolv.conf 2>&1\n"
+                    + "runi \"stat /etc/os-release >/dev/null && echo FS-STAT-OK\"\n"
+                    + "runi \"dd if=/dev/urandom bs=8 count=1 2>/dev/null | wc -c\"\n"
+                    + "runi \"nslookup dl-cdn.alpinelinux.org >/dev/null && echo DNS-OK\"\n"
+                    + "runi \"apk --version\"\n"
+                    + "say \"hint: for syscall-level breadcrumbs enable ZMUX proot debug mode\"\n";
+            java.nio.file.Files.write(target.toPath(),
+                    content.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            target.setExecutable(true, false);
         } catch (Exception ignored) {
         }
     }
@@ -354,6 +392,7 @@ public class TerminalSessionHelper {
         ensureGuestResolvConf(rootfs);
         ensureGuestPrompt(rootfs);
         ensureGuestMotd(rootfs);
+        ensureGuestDoctor(rootfs);
 
         java.util.List<String> args = new java.util.ArrayList<>(java.util.Arrays.asList(
             "--kill-on-exit",
@@ -407,7 +446,18 @@ public class TerminalSessionHelper {
             ldLibraryPath = compatDir + ":" + ldLibraryPath;
         }
 
+        // Opt-in syscall tracing for the "commands hang silently" class.
+        // `touch ~/.zmux_proot_debug` in the bootstrap shell, reopen the
+        // Linux tab, and proot's verbose breadcrumbs (-v 9) print straight
+        // into the terminal: the syscall stream right before the freeze is
+        // the diagnosis. Delete the file to go back to a quiet session.
+        boolean prootDebug = new java.io.File(filesDir, ".zmux_proot_debug").isFile();
+
         String loader = new java.io.File(nativeLibraryDir, "libproot-loader.so").getAbsolutePath();
+        if (prootDebug) {
+            args.add("-v");
+            args.add("9");
+        }
         args.add("-w");
         args.add("/root");
         args.add("/bin/sh");
